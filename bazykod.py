@@ -11,137 +11,194 @@ st.set_page_config(page_title="ProMagazyn v3.0", page_icon="📦", layout="wide"
 # --- 2. POŁĄCZENIE Z SUPABASE ---
 @st.cache_resource
 def init_connection():
-    return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
+    try:
+        return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
+    except Exception as e:
+        st.error("Brak konfiguracji secrets! Sprawdź SUPABASE_URL i SUPABASE_KEY.")
+        return None
 
 supabase = init_connection()
 
 # --- 3. FUNKCJE POMOCNICZE ---
 def log_history(produkt, typ, ilosc):
     """Zapisuje operację do tabeli historia w Supabase."""
-    supabase.table("historia").insert({
-        "produkt": produkt,
-        "typ": typ,
-        "ilosc": ilosc
-    }).execute()
+    try:
+        supabase.table("historia").insert({
+            "produkt": produkt,
+            "typ": typ,
+            "ilosc": ilosc
+        }).execute()
+    except Exception as e:
+        st.error(f"Nie udało się zapisać historii: {e}")
 
 def generate_pdf(dataframe):
-    """Tworzy prosty dokument PDF z historii."""
+    """Tworzy dokument PDF z historii z obsługą polskich znaków."""
     pdf = FPDF()
     pdf.add_page()
+    # Pobieranie czcionki z polskimi znakami
     pdf.add_font('DejaVu', '', 'https://github.com/reingart/pyfpdf/raw/master/font/DejaVuSans.ttf', uni=True)
     pdf.set_font('DejaVu', '', 16)
     pdf.cell(200, 10, txt="Raport Historii Magazynowej", ln=True, align='C')
     pdf.set_font('DejaVu', '', 10)
     pdf.ln(10)
     
-    # Nagłówki
-    pdf.cell(40, 10, "Data", border=1)
-    pdf.cell(70, 10, "Produkt", border=1)
-    pdf.cell(40, 10, "Typ", border=1)
-    pdf.cell(30, 10, "Ilość", border=1, ln=True)
+    # Nagłówki tabeli
+    pdf.set_fill_color(200, 220, 255)
+    pdf.cell(45, 10, "Data", border=1, fill=True)
+    pdf.cell(65, 10, "Produkt", border=1, fill=True)
+    pdf.cell(40, 10, "Typ", border=1, fill=True)
+    pdf.cell(30, 10, "Ilość", border=1, fill=True, ln=True)
     
     # Dane
     for _, row in dataframe.iterrows():
-        pdf.cell(40, 10, str(row['Data']), border=1)
-        pdf.cell(70, 10, str(row['Produkt']), border=1)
+        pdf.cell(45, 10, str(row['Data']), border=1)
+        pdf.cell(65, 10, str(row['Produkt']), border=1)
         pdf.cell(40, 10, str(row['Typ']), border=1)
         pdf.cell(30, 10, str(row['Ilość']), border=1, ln=True)
     
     return pdf.output()
 
-# --- 4. POBIERANIE DANYCH ---
-try:
-    p_res = supabase.table("produkty").select("id, nazwa, liczba, cena, kategoria(nazwa)").execute()
-    k_res = supabase.table("kategoria").select("id, nazwa").execute()
-    h_res = supabase.table("historia").select("*").order("created_at", desc=True).limit(50).execute()
-    
-    data = p_res.data
-    k_map = {k['nazwa']: k['id'] for k in k_res.data} if k_res.data else {}
-    history_data = h_res.data
-except Exception as e:
-    st.error(f"Błąd danych: {e}")
-    data, history_data = [], []
+# --- 4. POBIERANIE DANYCH Z ZABEZPIECZENIEM ---
+data = []
+history_data = []
+k_map = {} # Kluczowe: inicjalizacja przed try/except
 
-# --- 5. PRZYGOTOWANIE DF ---
+if supabase:
+    try:
+        # Pobieranie produktów i kategorii
+        p_res = supabase.table("produkty").select("id, nazwa, liczba, cena, kategoria(nazwa)").execute()
+        k_res = supabase.table("kategoria").select("id, nazwa").execute()
+        
+        data = p_res.data if p_res.data else []
+        k_map = {k['nazwa']: k['id'] for k in k_res.data} if k_res.data else {}
+        
+        # Próba pobrania historii (zabezpieczona, by brak tabeli nie psuł wszystkiego)
+        try:
+            h_res = supabase.table("historia").select("*").order("created_at", desc=True).limit(100).execute()
+            history_data = h_res.data if h_res.data else []
+        except Exception:
+            st.warning("⚠️ Tabela 'historia' nie została znaleziona w Supabase. Uruchom skrypt SQL.")
+            
+    except Exception as e:
+        st.error(f"Błąd połączenia z bazą: {e}")
+
+# --- 5. PRZYGOTOWANIE DATAFRAMES ---
 df = pd.DataFrame([
-    {"ID": i["id"], "Produkt": i["nazwa"], "Kategoria": i.get("kategoria", {}).get("nazwa") if i.get("kategoria") else "Brak",
-     "Ilość": i["liczba"], "Cena": i["cena"], "Wartość": i["liczba"] * i["cena"]} for i in data
+    {
+        "ID": i["id"], 
+        "Produkt": i["nazwa"], 
+        "Kategoria": i.get("kategoria", {}).get("nazwa") if i.get("kategoria") else "Brak",
+        "Ilość": i["liczba"], 
+        "Cena": i["cena"], 
+        "Wartość": i["liczba"] * i["cena"]
+    } for i in data
 ]) if data else pd.DataFrame()
 
 df_hist = pd.DataFrame([
-    {"Data": i["created_at"][:16].replace("T", " "), "Produkt": i["produkt"], "Typ": i["typ"], "Ilość": i["ilosc"]}
-    for i in history_data
+    {
+        "Data": i["created_at"][:16].replace("T", " "), 
+        "Produkt": i["produkt"], 
+        "Typ": i["typ"], 
+        "Ilość": i["ilosc"]
+    } for i in history_data
 ]) if history_data else pd.DataFrame()
 
-# --- 6. INTERFEJS ---
-st.title("📦 Magazyn z Historią Operacji")
+# --- 6. INTERFEJS UŻYTKOWNIKA ---
+st.title("📦 System ProMagazyn v3.0")
+st.markdown("---")
 
-# Widok główny (Tabela i Wykresy - tak jak wcześniej)
 tab_stan, tab_operacje, tab_historia = st.tabs(["📊 Stan Magazynu", "🛠️ Operacje", "📜 Historia i PDF"])
 
+# --- TAB 1: STAN MAGAZYNU ---
 with tab_stan:
     if not df.empty:
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Wartość towaru", f"{df['Wartość'].sum():,.2f} zł")
-        m2.metric("Suma sztuk", int(df['Ilość'].sum()))
-        m3.metric("Liczba SKU", len(df))
-        st.dataframe(df[["Produkt", "Kategoria", "Ilość", "Cena"]], use_container_width=True, hide_index=True)
-    else:
-        st.info("Brak danych.")
-
-with tab_operacje:
-    col1, col2 = st.columns(2)
-    with col1:
-        st.subheader("Wydaj / Przyjmij")
-        if not df.empty:
-            p_sel = st.selectbox("Produkt", df["Produkt"].tolist(), key="op_p")
-            ile = st.number_input("Ilość", min_value=1, step=1)
-            p_row = df[df["Produkt"] == p_sel].iloc[0]
-            
-            c_in, c_out = st.columns(2)
-            if c_in.button("📥 PRZYJMIJ", use_container_width=True):
-                new_q = p_row["Ilość"] + ile
-                supabase.table("produkty").update({"liczba": new_q}).eq("id", p_row["ID"]).execute()
-                log_history(p_sel, "Przyjęcie", ile) # LOGOWANIE
-                st.toast("Zaksięgowano przyjęcie")
-                st.rerun()
-            
-            if c_out.button("📤 WYDAJ", use_container_width=True):
-                if p_row["Ilość"] >= ile:
-                    new_q = p_row["Ilość"] - ile
-                    supabase.table("produkty").update({"liczba": new_q}).eq("id", p_row["ID"]).execute()
-                    log_history(p_sel, "Wydanie", ile) # LOGOWANIE
-                    st.toast("Zaksięgowano wydanie")
-                    st.rerun()
-                else:
-                    st.error("Brak towaru!")
-    
-    with col2:
-        st.subheader("Nowy Produkt")
-        n_p = st.text_input("Nazwa")
-        n_k = st.selectbox("Kategoria", list(k_map.keys()))
-        if st.button("Dodaj produkt"):
-            supabase.table("produkty").insert({"nazwa": n_p, "kategoria_id": k_map[n_k], "liczba": 0, "cena": 0}).execute()
-            log_history(n_p, "Nowy produkt", 0)
-            st.rerun()
-
-with tab_historia:
-    st.subheader("Ostatnie operacje")
-    if not df_hist.empty:
-        st.table(df_hist.head(15)) # Wyświetlamy 15 ostatnich
+        col_m1, col_m2, col_m3 = st.columns(3)
+        col_m1.metric("Wartość towaru", f"{df['Wartość'].sum():,.2f} zł")
+        col_m2.metric("Suma sztuk", int(df['Ilość'].sum()))
+        col_m3.metric("Liczba SKU", len(df))
         
-        # Sekcja PDF
+        st.subheader("Aktualne zapasy")
+        st.dataframe(
+            df[["Produkt", "Kategoria", "Ilość", "Cena"]], 
+            use_container_width=True, 
+            hide_index=True,
+            column_config={
+                "Ilość": st.column_config.ProgressColumn("Stan", min_value=0, max_value=100)
+            }
+        )
+    else:
+        st.info("Magazyn jest obecnie pusty.")
+
+# --- TAB 2: OPERACJE ---
+with tab_operacje:
+    col_left, col_right = st.columns(2)
+    
+    with col_left:
+        st.subheader("📥 Przyjęcie / 📤 Wydanie")
+        with st.container(border=True):
+            if not df.empty:
+                target_p = st.selectbox("Wybierz produkt", df["Produkt"].tolist())
+                amount = st.number_input("Ilość sztuk", min_value=1, step=1)
+                p_row = df[df["Produkt"] == target_p].iloc[0]
+                
+                c1, c2 = st.columns(2)
+                if c1.button("PRZYJMIJ", use_container_width=True, type="primary"):
+                    new_qty = p_row["Ilość"] + amount
+                    supabase.table("produkty").update({"liczba": new_qty}).eq("id", p_row["ID"]).execute()
+                    log_history(target_p, "Przyjęcie", amount)
+                    st.toast(f"Przyjęto {amount} szt. {target_p}")
+                    st.rerun()
+                
+                if c2.button("WYDAJ", use_container_width=True):
+                    if p_row["Ilość"] >= amount:
+                        new_qty = p_row["Ilość"] - amount
+                        supabase.table("produkty").update({"liczba": new_qty}).eq("id", p_row["ID"]).execute()
+                        log_history(target_p, "Wydanie", amount)
+                        st.toast(f"Wydano {amount} szt. {target_p}")
+                        st.rerun()
+                    else:
+                        st.error("Błąd: Niewystarczająca ilość towaru!")
+            else:
+                st.info("Brak produktów do edycji.")
+
+    with col_right:
+        st.subheader("✨ Nowe zasoby")
+        with st.container(border=True):
+            sub_tab1, sub_tab2 = st.tabs(["Produkt", "Kategoria"])
+            with sub_tab1:
+                p_name = st.text_input("Nazwa przedmiotu")
+                p_kat = st.selectbox("Kategoria", list(k_map.keys()) if k_map else ["Brak"])
+                p_price = st.number_input("Cena jedn.", min_value=0.0)
+                if st.button("Dodaj produkt", use_container_width=True):
+                    if p_name and p_kat != "Brak":
+                        supabase.table("produkty").insert({
+                            "nazwa": p_name, "kategoria_id": k_map[p_kat], "liczba": 0, "cena": p_price
+                        }).execute()
+                        log_history(p_name, "Utworzenie", 0)
+                        st.rerun()
+            with sub_tab2:
+                k_name = st.text_input("Nowa kategoria")
+                if st.button("Dodaj kategorię", use_container_width=True):
+                    if k_name:
+                        supabase.table("kategoria").insert({"nazwa": k_name}).execute()
+                        st.rerun()
+
+# --- TAB 3: HISTORIA I PDF ---
+with tab_historia:
+    if not df_hist.empty:
+        st.subheader("Ostatnie zdarzenia")
+        st.dataframe(df_hist, use_container_width=True, hide_index=True)
+        
         st.markdown("---")
-        if st.button("📄 Generuj raport PDF (Ostatnie 50 operacji)"):
-            try:
-                pdf_bytes = generate_pdf(df_hist)
+        st.subheader("Generowanie Raportu")
+        if st.button("📄 Pobierz historię jako PDF", type="secondary"):
+            with st.spinner("Generowanie pliku..."):
+                pdf_output = generate_pdf(df_hist)
                 st.download_button(
-                    label="💾 Pobierz PDF",
-                    data=pdf_bytes,
-                    file_name=f"raport_magazyn_{datetime.now().strftime('%Y%m%d')}.pdf",
+                    label="💾 Zapisz plik PDF",
+                    data=pdf_output,
+                    file_name=f"raport_magazyn_{datetime.now().strftime('%d_%m_%Y')}.pdf",
                     mime="application/pdf"
                 )
-            except Exception as e:
-                st.error(f"Błąd generowania PDF: {e}. Upewnij się, że masz zainstalowane fpdf2.")
     else:
-        st.info("Brak historii operacji.")
+        st.info("Historia jest pusta. Wykonaj pierwsze operacje, aby zobaczyć logi.")
