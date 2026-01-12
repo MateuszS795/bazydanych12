@@ -75,7 +75,7 @@ else:
     df = pd.DataFrame(columns=["ID", "Produkt", "Kategoria", "Ilość", "Cena", "Wartość"])
 
 # --- 7. PANEL GŁÓWNY - KPI ---
-st.title("📦 ProMagazyn 3000")
+st.title("📦 Magazyn X")
 
 if not df.empty:
     m1, m2, m3, m4 = st.columns(4)
