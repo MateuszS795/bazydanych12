@@ -3,7 +3,7 @@ from supabase import create_client, Client
 import pandas as pd
 from datetime import datetime
 import io
-import time  # Dodane do obsługi przerw przy błędach połączenia
+import time
 
 # --- 1. KONFIGURACJA STRONY ---
 st.set_page_config(page_title="Magazyn", page_icon="📦", layout="wide")
@@ -21,15 +21,15 @@ def init_connection():
 
 supabase = init_connection()
 
-# --- 3. FUNKCJE POMOCNICZE (Z RETRY) ---
+# --- 3. FUNKCJE POMOCNICZE ---
 def safe_execute(query_func):
-    """Próbuje wykonać zapytanie 3 razy w przypadku błędu Errno 11."""
+    """Obsługa błędów połączenia Errno 11 (Retry)."""
     for i in range(3):
         try:
             return query_func().execute()
         except Exception as e:
             if "11" in str(e) and i < 2:
-                time.sleep(1)  # Czekaj sekundę przed kolejną próbą
+                time.sleep(1)
                 continue
             raise e
 
@@ -44,6 +44,13 @@ def log_history(produkt, typ, ilosc):
         except:
             pass 
 
+def generate_txt(dataframe):
+    output = io.StringIO()
+    output.write(f"RAPORT MAGAZYNOWY - {datetime.now().strftime('%Y-%m-%d %H:%M')}\n" + "="*50 + "\n")
+    for _, row in dataframe.iterrows():
+        output.write(f"{row['Data']} | {row['Produkt']} | {row['Typ']} | {row['Ilość']} szt.\n")
+    return output.getvalue()
+
 # --- 4. POBIERANIE DANYCH ---
 data, history_data, k_map = [], [], {}
 
@@ -56,7 +63,8 @@ if supabase:
         k_map = {k['nazwa']: int(k['id']) for k in k_res.data} if k_res.data else {}
         
         try:
-            h_res = safe_execute(lambda: supabase.table("historia").select("*").order("created_at", desc=True).limit(50))
+            # Pobieramy historię (limit 100 dla wydajności)
+            h_res = safe_execute(lambda: supabase.table("historia").select("*").order("created_at", desc=True).limit(100))
             history_data = h_res.data if h_res.data else []
         except:
             pass
@@ -81,6 +89,7 @@ df_hist = pd.DataFrame([
 st.title("📦 Magazyn")
 t1, t2, t3 = st.tabs(["📊 Stan", "🛠️ Operacje", "📜 Historia"])
 
+# Stan i Operacje pozostają bez zmian względem v4.2...
 with t1:
     if not df.empty:
         c1, c2, c3 = st.columns(3)
@@ -93,7 +102,6 @@ with t1:
 
 with t2:
     col_l, col_r = st.columns(2)
-    
     with col_l:
         st.subheader("Ruch towaru")
         if not df.empty:
@@ -122,7 +130,7 @@ with t2:
             n_name = st.text_input("Nazwa")
             n_kat = st.selectbox("Kategoria", list(k_map.keys()) if k_map else ["Brak"])
             n_price = st.number_input("Cena", min_value=0.0)
-            if st.button("Zapisz", use_container_width=True):
+            if st.button("Zapisz produkt", use_container_width=True):
                 if n_name and n_kat != "Brak":
                     safe_execute(lambda: supabase.table("produkty").insert({"nazwa": n_name, "kategoria_id": k_map[n_kat], "liczba": 0, "cena": n_price}))
                     log_history(n_name, "Utworzenie", 0)
@@ -145,6 +153,30 @@ with t2:
                         safe_execute(lambda: supabase.table("kategoria").delete().eq("id", kid))
                         st.rerun()
 
+# --- ZAKŁADKA 3: HISTORIA (Z FUNKCJĄ CZYSZCZENIA) ---
 with t3:
     if not df_hist.empty:
         st.dataframe(df_hist, use_container_width=True, hide_index=True)
+        
+        c_rep, c_del = st.columns(2)
+        
+        with c_rep:
+            txt_report = generate_txt(df_hist)
+            st.download_button(
+                label="📄 Pobierz raport (TXT)",
+                data=txt_report,
+                file_name=f"raport_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
+                mime="text/plain",
+                use_container_width=True
+            )
+            
+        with c_del:
+            if st.button("🗑️ Wyczyść całą historię", type="secondary", use_container_width=True):
+                with st.spinner("Usuwanie..."):
+                    # Usuwamy wszystkie rekordy (filtrujemy po ID > 0)
+                    safe_execute(lambda: supabase.table("historia").delete().gt("id", 0))
+                    st.success("Historia została wyczyszczona.")
+                    time.sleep(1)
+                    st.rerun()
+    else:
+        st.info("Historia operacji jest pusta.")
