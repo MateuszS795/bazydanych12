@@ -33,10 +33,27 @@ def safe_execute(query_func):
                 continue
             raise e
 
+def get_lowest_free_id(table_name):
+    """Szuka najniższego wolnego numeru ID począwszy od 0."""
+    try:
+        res = safe_execute(lambda: supabase.table(table_name).select("id"))
+        existing_ids = [int(item['id']) for item in res.data] if res.data else []
+        existing_ids.sort()
+        
+        new_id = 0
+        while new_id in existing_ids:
+            new_id += 1
+        return new_id
+    except:
+        return 0
+
 def log_history(produkt, typ, ilosc):
     if supabase:
         try:
+            # Historia zawsze dostaje kolejny numer lub najniższy wolny
+            h_id = get_lowest_free_id("historia")
             safe_execute(lambda: supabase.table("historia").insert({
+                "id": h_id,
                 "produkt": str(produkt),
                 "typ": str(typ),
                 "ilosc": int(ilosc)
@@ -123,7 +140,7 @@ with t2:
                     else:
                         st.error("Za mało towaru na stanie!")
         else:
-            st.info("Opcja niedostępna - dodaj najpierw produkty do bazy.")
+            st.info("Dodaj najpierw produkty.")
 
     with col_r:
         st.subheader("Zarządzanie produktami")
@@ -132,22 +149,21 @@ with t2:
             
             with pt1:
                 n_name = st.text_input("Nazwa nowego produktu")
-                # Lista kategorii - jeśli pusta, zawiera tylko "Brak"
                 available_cats = list(k_map.keys()) if k_map else ["Brak"]
                 n_kat = st.selectbox("Kategoria", available_cats, key="add_p_kat")
                 n_price = st.number_input("Cena", min_value=0.0, key="add_p_price")
                 
-                if st.button("Zapisz nowy produkt", use_container_width=True):
-                    # --- KLUCZOWA POPRAWKA: Błąd przy braku kategorii ---
+                if st.button("Zapisz produkt", use_container_width=True):
                     if n_kat == "Brak":
-                        st.error("Błąd! Nie możesz dodać produktu do 'Brak'. Najpierw utwórz co najmniej jedną kategorię w panelu poniżej.")
-                    elif not n_name:
-                        st.warning("Podaj nazwę produktu.")
-                    else:
+                        st.error("Najpierw utwórz kategorię!")
+                    elif n_name:
                         if not df.empty and n_name.strip().lower() in df["Produkt"].str.lower().values:
                             st.error("Produkt o tej nazwie już istnieje!")
                         else:
+                            # --- PRZYDZIELANIE NAJNIŻSZEGO ID ---
+                            new_p_id = get_lowest_free_id("produkty")
                             safe_execute(lambda: supabase.table("produkty").insert({
+                                "id": new_p_id,
                                 "nazwa": n_name.strip(), 
                                 "kategoria_id": k_map[n_kat], 
                                 "liczba": 0, 
@@ -155,21 +171,19 @@ with t2:
                             }))
                             log_history(n_name, "Utworzenie", 0)
                             st.rerun()
-            
+
             with pt2:
                 if not df.empty:
                     edit_p = st.selectbox("Produkt do edycji", df["Produkt"].tolist())
                     new_p_name = st.text_input("Nowa nazwa", value=edit_p)
                     if st.button("Zaktualizuj nazwę", use_container_width=True):
                         if new_p_name.strip().lower() in df["Produkt"].str.lower().values and new_p_name.strip().lower() != edit_p.lower():
-                            st.error("Ta nazwa jest już zajęta!")
+                            st.error("Ta nazwa jest zajęta!")
                         else:
                             p_id = df[df["Produkt"] == edit_p].iloc[0]["ID"]
                             safe_execute(lambda: supabase.table("produkty").update({"nazwa": new_p_name.strip()}).eq("id", p_id))
                             log_history(edit_p, f"Zmiana nazwy na: {new_p_name}", 0)
                             st.rerun()
-                else:
-                    st.write("Brak produktów.")
 
             with pt3:
                 if not df.empty:
@@ -190,7 +204,12 @@ with t2:
                         if new_c.strip().lower() in [k.lower() for k in k_map.keys()]:
                             st.error("Kategoria już istnieje!")
                         else:
-                            safe_execute(lambda: supabase.table("kategoria").insert({"nazwa": new_c.strip()}))
+                            # --- PRZYDZIELANIE NAJNIŻSZEGO ID ---
+                            new_c_id = get_lowest_free_id("kategoria")
+                            safe_execute(lambda: supabase.table("kategoria").insert({
+                                "id": new_c_id,
+                                "nazwa": new_c.strip()
+                            }))
                             st.rerun()
             with ct2:
                 if k_map:
@@ -211,7 +230,7 @@ with t3:
             st.download_button("📄 Pobierz raport (TXT)", txt_report, f"raport_{datetime.now().strftime('%Y%m%d_%H%M')}.txt", "text/plain", use_container_width=True)
         with c_del:
             if st.button("🗑️ Wyczyść całą historię", type="secondary", use_container_width=True):
-                safe_execute(lambda: supabase.table("historia").delete().gt("id", 0))
+                safe_execute(lambda: supabase.table("historia").delete().gt("id", -1)) # Usuwa wszystko od 0 w górę
                 st.rerun()
     else:
         st.info("Historia operacji jest pusta.")
