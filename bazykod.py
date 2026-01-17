@@ -3,6 +3,7 @@ from supabase import create_client, Client
 import pandas as pd
 from datetime import datetime
 import io
+import time  # Dodane do obsługi przerw przy błędach połączenia
 
 # --- 1. KONFIGURACJA STRONY ---
 st.set_page_config(page_title="Magazyn", page_icon="📦", layout="wide")
@@ -15,49 +16,50 @@ def init_connection():
         key = st.secrets["SUPABASE_KEY"]
         return create_client(url, key)
     except Exception as e:
-        st.error(f"Błąd połączenia z bazą: {e}")
+        st.error(f"Błąd połączenia: {e}")
         return None
 
 supabase = init_connection()
 
-# --- 3. FUNKCJE POMOCNICZE ---
+# --- 3. FUNKCJE POMOCNICZE (Z RETRY) ---
+def safe_execute(query_func):
+    """Próbuje wykonać zapytanie 3 razy w przypadku błędu Errno 11."""
+    for i in range(3):
+        try:
+            return query_func().execute()
+        except Exception as e:
+            if "11" in str(e) and i < 2:
+                time.sleep(1)  # Czekaj sekundę przed kolejną próbą
+                continue
+            raise e
+
 def log_history(produkt, typ, ilosc):
-    """Zapisuje zdarzenie w historii."""
     if supabase:
         try:
-            supabase.table("historia").insert({
+            safe_execute(lambda: supabase.table("historia").insert({
                 "produkt": str(produkt),
                 "typ": str(typ),
                 "ilosc": int(ilosc)
-            }).execute()
-        except Exception as e:
-            st.sidebar.error(f"Błąd zapisu historii: {e}")
-
-def generate_txt(dataframe):
-    output = io.StringIO()
-    output.write(f"RAPORT MAGAZYNOWY - {datetime.now().strftime('%Y-%m-%d %H:%M')}\n" + "="*50 + "\n")
-    for _, row in dataframe.iterrows():
-        output.write(f"{row['Data']} | {row['Produkt']} | {row['Typ']} | {row['Ilość']} szt.\n")
-    return output.getvalue()
+            }))
+        except:
+            pass 
 
 # --- 4. POBIERANIE DANYCH ---
 data, history_data, k_map = [], [], {}
 
 if supabase:
     try:
-        # Pobieranie produktów i kategorii
-        p_res = supabase.table("produkty").select("id, nazwa, liczba, cena, kategoria(id, nazwa)").execute()
-        k_res = supabase.table("kategoria").select("id, nazwa").execute()
+        p_res = safe_execute(lambda: supabase.table("produkty").select("id, nazwa, liczba, cena, kategoria(id, nazwa)"))
+        k_res = safe_execute(lambda: supabase.table("kategoria").select("id, nazwa"))
         
         data = p_res.data if p_res.data else []
         k_map = {k['nazwa']: int(k['id']) for k in k_res.data} if k_res.data else {}
         
-        # Pobieranie historii
         try:
-            h_res = supabase.table("historia").select("*").order("created_at", desc=True).limit(50).execute()
+            h_res = safe_execute(lambda: supabase.table("historia").select("*").order("created_at", desc=True).limit(50))
             history_data = h_res.data if h_res.data else []
-        except Exception as e:
-            pass 
+        except:
+            pass
             
     except Exception as e:
         st.error(f"Błąd pobierania danych: {e}")
@@ -79,135 +81,70 @@ df_hist = pd.DataFrame([
 st.title("📦 Magazyn")
 t1, t2, t3 = st.tabs(["📊 Stan", "🛠️ Operacje", "📜 Historia"])
 
-# --- ZAKŁADKA 1: STAN ---
 with t1:
     if not df.empty:
         c1, c2, c3 = st.columns(3)
-        c1.metric("Wartość całkowita", f"{df['Wartość'].sum():,.2f} zł")
-        c2.metric("Liczba sztuk", int(df['Ilość'].sum()))
-        c3.metric("Liczba produktów", len(df))
+        c1.metric("Wartość", f"{df['Wartość'].sum():,.2f} zł")
+        c2.metric("Sztuk", int(df['Ilość'].sum()))
+        c3.metric("Produkty", len(df))
         st.dataframe(df[["Produkt", "Kategoria", "Ilość", "Cena"]], use_container_width=True, hide_index=True)
     else:
-        st.info("Baza danych jest pusta. Dodaj produkty w zakładce Operacje.")
+        st.info("Baza jest pusta.")
 
-# --- ZAKŁADKA 2: OPERACJE ---
 with t2:
     col_l, col_r = st.columns(2)
     
-    # LEWA KOLUMNA: Ruch towaru
     with col_l:
         st.subheader("Ruch towaru")
         if not df.empty:
             with st.container(border=True):
-                target_p = st.selectbox("Wybierz produkt", df["Produkt"].tolist(), key="op_prod")
-                amount = st.number_input("Ilość", min_value=1, step=1, key="op_amount")
-                
+                target_p = st.selectbox("Produkt", df["Produkt"].tolist())
+                amount = st.number_input("Ilość", min_value=1, step=1)
                 p_row = df[df["Produkt"] == target_p].iloc[0]
-                p_id = int(p_row["ID"])
-                current_qty = int(p_row["Ilość"])
                 
                 b1, b2 = st.columns(2)
-                if b1.button("📥 PRZYJMIJ", use_container_width=True, type="primary"):
-                    with st.spinner("Zapisywanie..."):
-                        supabase.table("produkty").update({"liczba": current_qty + int(amount)}).eq("id", p_id).execute()
-                        log_history(target_p, "Przyjęcie", amount)
-                        st.rerun()
-                
+                if b1.button("📥 PRZYJMIJ", use_container_width=True):
+                    safe_execute(lambda: supabase.table("produkty").update({"liczba": int(p_row["Ilość"]) + amount}).eq("id", p_row["ID"]))
+                    log_history(target_p, "Przyjęcie", amount)
+                    st.rerun()
                 if b2.button("📤 WYDAJ", use_container_width=True):
-                    if current_qty >= int(amount):
-                        with st.spinner("Zapisywanie..."):
-                            supabase.table("produkty").update({"liczba": current_qty - int(amount)}).eq("id", p_id).execute()
-                            log_history(target_p, "Wydanie", amount)
-                            st.rerun()
+                    if p_row["Ilość"] >= amount:
+                        safe_execute(lambda: supabase.table("produkty").update({"liczba": int(p_row["Ilość"]) - amount}).eq("id", p_row["ID"]))
+                        log_history(target_p, "Wydanie", amount)
+                        st.rerun()
                     else:
-                        st.error(f"Błąd! Masz tylko {current_qty} szt. na stanie.")
-        
-        st.subheader("Usuwanie")
-        if not df.empty:
-            with st.container(border=True):
-                del_p = st.selectbox("Produkt do usunięcia", df["Produkt"].tolist(), key="del_prod_sel")
-                if st.button("❌ USUŃ PRODUKT", use_container_width=True):
-                    with st.spinner("Usuwanie..."):
-                        p_id_del = int(df[df["Produkt"] == del_p].iloc[0]["ID"])
-                        supabase.table("produkty").delete().eq("id", p_id_del).execute()
-                        log_history(del_p, "Usunięcie produktu", 0)
-                        st.rerun()
+                        st.error("Za mało towaru!")
 
-    # PRAWA KOLUMNA: Zarządzanie bazą
     with col_r:
-        st.subheader("Baza produktów")
-        
+        st.subheader("Baza danych")
         with st.container(border=True):
-            st.write("**Dodaj Nowy Produkt**")
-            n_name = st.text_input("Nazwa", key="n_p_name")
-            n_kat = st.selectbox("Kategoria", list(k_map.keys()) if k_map else ["Brak"], key="n_p_kat")
-            n_price = st.number_input("Cena (zł)", min_value=0.0, key="n_p_price")
-            
-            if st.button("Zapisz produkt", use_container_width=True):
+            st.write("**Dodaj Produkt**")
+            n_name = st.text_input("Nazwa")
+            n_kat = st.selectbox("Kategoria", list(k_map.keys()) if k_map else ["Brak"])
+            n_price = st.number_input("Cena", min_value=0.0)
+            if st.button("Zapisz", use_container_width=True):
                 if n_name and n_kat != "Brak":
-                    with st.spinner("Dodawanie..."):
-                        supabase.table("produkty").insert({
-                            "nazwa": n_name, 
-                            "kategoria_id": k_map[n_kat], 
-                            "liczba": 0, 
-                            "cena": n_price
-                        }).execute()
-                        log_history(n_name, "Utworzenie", 0)
-                        st.rerun()
-                else:
-                    st.warning("Wpisz nazwę i wybierz kategorię.")
+                    safe_execute(lambda: supabase.table("produkty").insert({"nazwa": n_name, "kategoria_id": k_map[n_kat], "liczba": 0, "cena": n_price}))
+                    log_history(n_name, "Utworzenie", 0)
+                    st.rerun()
 
         with st.container(border=True):
             st.write("**Zarządzaj Kategoriami**")
-            ck1, ck2 = st.tabs(["➕ Dodaj", "✏️ Edytuj / Usuń"])
-            
+            ck1, ck2 = st.tabs(["➕ Dodaj", "🗑️ Usuń"])
             with ck1:
-                new_cat = st.text_input("Nowa nazwa kategorii", key="n_c_name")
-                if st.button("Utwórz kategorię", use_container_width=True):
-                    if new_cat:
-                        if new_cat.strip() in k_map:
-                            st.error("Taka kategoria już istnieje!")
-                        else:
-                            with st.spinner("Tworzenie..."):
-                                supabase.table("kategoria").insert({"nazwa": new_cat.strip()}).execute()
-                                st.rerun()
-            
+                new_c = st.text_input("Nowa kategoria")
+                if st.button("Utwórz"):
+                    safe_execute(lambda: supabase.table("kategoria").insert({"nazwa": new_c}))
+                    st.rerun()
             with ck2:
                 if k_map:
-                    cat_sel = st.selectbox("Wybierz kategorię", list(k_map.keys()), key="c_sel")
-                    new_name = st.text_input("Zmień nazwę na", value=cat_sel, key="c_edit")
-                    
-                    col_e1, col_e2 = st.columns(2)
-                    
-                    if col_e1.button("Zmień nazwę", use_container_width=True):
-                        if new_name.strip() in k_map and new_name.strip() != cat_sel:
-                            st.error("Nazwa zajęta!")
-                        else:
-                            with st.spinner("Aktualizacja..."):
-                                supabase.table("kategoria").update({"nazwa": new_name.strip()}).eq("id", k_map[cat_sel]).execute()
-                                st.rerun()
-                    
-                    # --- ZMIANA: Kaskadowe usuwanie ---
-                    if col_e2.button("Usuń", use_container_width=True):
-                        with st.spinner("Usuwanie kategorii i produktów..."):
-                            cat_id_to_del = k_map[cat_sel]
-                            
-                            # 1. Usuń wszystkie produkty należące do tej kategorii
-                            supabase.table("produkty").delete().eq("kategoria_id", cat_id_to_del).execute()
-                            
-                            # 2. Usuń samą kategorię
-                            supabase.table("kategoria").delete().eq("id", cat_id_to_del).execute()
-                            
-                            st.success(f"Usunięto kategorię '{cat_sel}' wraz z produktami.")
-                            st.rerun()
-                else:
-                    st.info("Brak kategorii. Dodaj pierwszą w zakładce obok.")
+                    c_to_del = st.selectbox("Usuń kategorię", list(k_map.keys()))
+                    if st.button("USUŃ (WRAZ Z PRODUKTAMI)", type="primary"):
+                        kid = k_map[c_to_del]
+                        safe_execute(lambda: supabase.table("produkty").delete().eq("kategoria_id", kid))
+                        safe_execute(lambda: supabase.table("kategoria").delete().eq("id", kid))
+                        st.rerun()
 
-# --- ZAKŁADKA 3: HISTORIA ---
 with t3:
     if not df_hist.empty:
         st.dataframe(df_hist, use_container_width=True, hide_index=True)
-        txt_report = generate_txt(df_hist)
-        st.download_button("📄 Pobierz raport (TXT)", txt_report, f"raport_{datetime.now().strftime('%Y%m%d')}.txt", "text/plain")
-    else:
-        st.info("Historia operacji jest pusta.")
