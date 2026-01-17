@@ -2,5 +2,3 @@ streamlit
 supabase
 pandas
 plotly
-fpdf2
-requests
