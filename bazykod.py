@@ -1,14 +1,23 @@
 import streamlit as st
 from supabase import create_client, Client
 import pandas as pd
+import plotly.express as px
 from datetime import datetime
 import io
 import time
 
-# --- 1. KONFIGURACJA STRONY ---
-st.set_page_config(page_title="Magazyn", page_icon="📦", layout="wide")
+# --- 1. KONFIGURACJA ---
+st.set_page_config(page_title="Magazyn Pro", page_icon="📦", layout="wide")
 
-# --- 2. POŁĄCZENIE Z SUPABASE ---
+# Stylizacja dla "fancy" efektu
+st.markdown("""
+    <style>
+    .stMetric { border: 1px solid #e6e9ef; padding: 10px; border-radius: 10px; background: white; }
+    div[data-testid="stExpander"] { border: none !important; box-shadow: none !important; }
+    </style>
+    """, unsafe_allow_html=True)
+
+# --- 2. POŁĄCZENIE ---
 @st.cache_resource
 def init_connection():
     try:
@@ -21,216 +30,155 @@ def init_connection():
 
 supabase = init_connection()
 
-# --- 3. FUNKCJE POMOCNICZE ---
+# --- 3. LOGIKA BIZNESOWA (ID, EXECUTOR, RAPORT) ---
 def safe_execute(query_func):
-    """Obsługa błędów połączenia Errno 11 (Retry)."""
     for i in range(3):
-        try:
-            return query_func().execute()
+        try: return query_func().execute()
         except Exception as e:
-            if "11" in str(e) and i < 2:
-                time.sleep(1)
-                continue
+            if "11" in str(e) and i < 2: time.sleep(1); continue
             raise e
 
 def get_lowest_free_id(table_name):
-    """Szuka najniższego wolnego numeru ID począwszy od 0."""
-    try:
-        res = safe_execute(lambda: supabase.table(table_name).select("id"))
-        existing_ids = [int(item['id']) for item in res.data] if res.data else []
-        existing_ids.sort()
-        
-        new_id = 0
-        while new_id in existing_ids:
-            new_id += 1
-        return new_id
-    except:
-        return 0
+    res = safe_execute(lambda: supabase.table(table_name).select("id"))
+    ids = [int(i['id']) for i in res.data] if res.data else []
+    n = 0
+    while n in ids: n += 1
+    return n
 
-def log_history(produkt, typ, ilosc):
+def log_history(p, t, q):
     if supabase:
         try:
-            # Historia zawsze dostaje kolejny numer lub najniższy wolny
             h_id = get_lowest_free_id("historia")
-            safe_execute(lambda: supabase.table("historia").insert({
-                "id": h_id,
-                "produkt": str(produkt),
-                "typ": str(typ),
-                "ilosc": int(ilosc)
-            }))
-        except:
-            pass 
+            safe_execute(lambda: supabase.table("historia").insert({"id": h_id, "produkt": str(p), "typ": str(t), "ilosc": int(q)}))
+        except: pass
 
-def generate_txt(dataframe):
-    output = io.StringIO()
-    output.write(f"RAPORT MAGAZYNOWY - {datetime.now().strftime('%Y-%m-%d %H:%M')}\n" + "="*50 + "\n")
-    for _, row in dataframe.iterrows():
-        output.write(f"{row['Data']} | {row['Produkt']} | {row['Typ']} | {row['Ilość']} szt.\n")
-    return output.getvalue()
+def generate_txt(df_h):
+    out = io.StringIO()
+    out.write(f"RAPORT MAGAZYNOWY PRO - {datetime.now().strftime('%Y-%m-%d %H:%M')}\n" + "="*55 + "\n")
+    for _, r in df_h.iterrows():
+        out.write(f"{r['Data']} | {r['Produkt']:<20} | {r['Typ']:<12} | {r['Ilość']} szt.\n")
+    return out.getvalue()
 
 # --- 4. POBIERANIE DANYCH ---
-data, history_data, k_map = [], [], {}
-
+p_raw, k_raw, h_raw, k_map = [], [], [], {}
 if supabase:
     try:
-        p_res = safe_execute(lambda: supabase.table("produkty").select("id, nazwa, liczba, cena, kategoria(id, nazwa)"))
+        p_res = safe_execute(lambda: supabase.table("produkty").select("id, nazwa, liczba, cena, koszt, kategoria(id, nazwa)"))
         k_res = safe_execute(lambda: supabase.table("kategoria").select("id, nazwa"))
-        
-        data = p_res.data if p_res.data else []
-        k_map = {k['nazwa']: int(k['id']) for k in k_res.data} if k_res.data else {}
-        
-        try:
-            h_res = safe_execute(lambda: supabase.table("historia").select("*").order("created_at", desc=True).limit(100))
-            history_data = h_res.data if h_res.data else []
-        except:
-            pass
-            
-    except Exception as e:
-        st.error(f"Błąd pobierania danych: {e}")
+        h_res = safe_execute(lambda: supabase.table("historia").select("*").order("created_at", desc=True).limit(50))
+        p_raw, k_raw, h_raw = p_res.data or [], k_res.data or [], h_res.data or []
+        k_map = {k['nazwa']: int(k['id']) for k in k_raw}
+    except Exception as e: st.error(f"Dane: {e}")
 
-# --- 5. PRZYGOTOWANIE TABEL ---
-df = pd.DataFrame(data) if data else pd.DataFrame()
+# --- 5. PRZETWARZANIE ---
+df = pd.DataFrame(p_raw) if p_raw else pd.DataFrame()
 if not df.empty:
     df["Kategoria"] = df["kategoria"].apply(lambda x: x["nazwa"] if x else "Brak")
-    df = df.rename(columns={"nazwa": "Produkt", "liczba": "Ilość", "cena": "Cena", "id": "ID"})
-    df["Wartość"] = df["Ilość"] * df["Cena"]
+    df = df.rename(columns={"nazwa": "Produkt", "liczba": "Ilość", "cena": "Sprzedaż", "koszt": "Zakup", "id": "ID"})
+    df["Wartość"] = df["Ilość"] * df["Sprzedaż"]
+    df["Koszt"] = df["Ilość"] * df["Zakup"]
+    df["Zysk"] = df["Wartość"] - df["Koszt"]
+    df["Marża %"] = ((df["Sprzedaż"] - df["Zakup"]) / df["Sprzedaż"] * 100).fillna(0)
 
-df_hist = pd.DataFrame([
+df_h = pd.DataFrame([
     {"Data": i["created_at"][:16].replace("T", " "), "Produkt": i["produkt"], "Typ": i["typ"], "Ilość": i["ilosc"]}
-    for i in history_data
-]) if history_data else pd.DataFrame()
+    for i in h_raw
+]) if h_raw else pd.DataFrame()
 
 # --- 6. INTERFEJS ---
-st.title("📦 Magazyn")
-t1, t2, t3 = st.tabs(["📊 Stan", "🛠️ Operacje", "📜 Historia"])
+st.title("📦 Magazyn Pro v5.1")
+t1, t_an, t2, t3 = st.tabs(["📊 Stan", "📈 Analiza", "🛠️ Operacje", "📜 Historia"])
 
-# --- ZAKŁADKA 1: STAN ---
 with t1:
     if not df.empty:
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Wartość", f"{df['Wartość'].sum():,.2f} zł")
-        c2.metric("Sztuk", int(df['Ilość'].sum()))
-        c3.metric("Produkty", len(df))
-        st.dataframe(df[["Produkt", "Kategoria", "Ilość", "Cena"]], use_container_width=True, hide_index=True)
-    else:
-        st.info("Magazyn jest pusty.")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Wycena", f"{df['Wartość'].sum():,.2f} zł")
+        c2.metric("Inwestycja", f"{df['Koszt'].sum():,.2f} zł")
+        c3.metric("Zysk", f"{df['Zysk'].sum():,.2f} zł", f"{df['Marża %'].mean():.1f}%")
+        c4.metric("SKU", len(df))
+        st.dataframe(df[["Produkt", "Kategoria", "Ilość", "Zakup", "Sprzedaż", "Marża %"]], use_container_width=True, hide_index=True)
+    else: st.info("Magazyn jest pusty.")
 
-# --- ZAKŁADKA 2: OPERACJE ---
+with t_an:
+    if not df.empty:
+        col_a1, col_a2 = st.columns(2)
+        with col_a1:
+            st.plotly_chart(px.pie(df, values='Wartość', names='Kategoria', title='Udział Kategorii', hole=.4), use_container_width=True)
+        with col_a2:
+            st.plotly_chart(px.bar(df.nlargest(5, 'Zysk'), x='Produkt', y='Zysk', title='Top 5 - Najbardziej Dochodowe', color='Zysk'), use_container_width=True)
+        st.plotly_chart(px.scatter(df, x="Ilość", y="Sprzedaż", size="Wartość", color="Kategoria", hover_name="Produkt", title="Mapa Kapitału"), use_container_width=True)
+    else: st.info("Brak danych do analizy.")
+
 with t2:
     col_l, col_r = st.columns(2)
-    
     with col_l:
         st.subheader("Ruch towaru")
         if not df.empty:
             with st.container(border=True):
-                target_p = st.selectbox("Produkt", df["Produkt"].tolist(), key="move_p")
-                amount = st.number_input("Ilość", min_value=1, step=1, key="move_a")
+                target_p = st.selectbox("Produkt", df["Produkt"].tolist())
+                qty = st.number_input("Ilość", min_value=1)
                 p_row = df[df["Produkt"] == target_p].iloc[0]
-                
                 b1, b2 = st.columns(2)
-                if b1.button("📥 PRZYJMIJ", use_container_width=True):
-                    safe_execute(lambda: supabase.table("produkty").update({"liczba": int(p_row["Ilość"]) + amount}).eq("id", p_row["ID"]))
-                    log_history(target_p, "Przyjęcie", amount)
-                    st.rerun()
+                if b1.button("📥 PRZYJMIJ", use_container_width=True, type="primary"):
+                    safe_execute(lambda: supabase.table("produkty").update({"liczba": int(p_row["Ilość"]) + qty}).eq("id", p_row["ID"]))
+                    log_history(target_p, "Przyjęcie", qty); st.rerun()
                 if b2.button("📤 WYDAJ", use_container_width=True):
-                    if p_row["Ilość"] >= amount:
-                        safe_execute(lambda: supabase.table("produkty").update({"liczba": int(p_row["Ilość"]) - amount}).eq("id", p_row["ID"]))
-                        log_history(target_p, "Wydanie", amount)
-                        st.rerun()
-                    else:
-                        st.error("Za mało towaru na stanie!")
-        else:
-            st.info("Dodaj najpierw produkty.")
+                    if p_row["Ilość"] >= qty:
+                        safe_execute(lambda: supabase.table("produkty").update({"liczba": int(p_row["Ilość"]) - qty}).eq("id", p_row["ID"]))
+                        log_history(target_p, "Wydanie", qty); st.rerun()
+                    else: st.error("Mało towaru!")
+        else: st.warning("Dodaj najpierw produkty.")
 
     with col_r:
-        st.subheader("Zarządzanie produktami")
+        st.subheader("Baza")
         with st.container(border=True):
-            pt1, pt2, pt3 = st.tabs(["➕ Dodaj", "✏️ Edytuj", "🗑️ Usuń"])
-            
-            with pt1:
-                n_name = st.text_input("Nazwa nowego produktu")
-                available_cats = list(k_map.keys()) if k_map else ["Brak"]
-                n_kat = st.selectbox("Kategoria", available_cats, key="add_p_kat")
-                n_price = st.number_input("Cena", min_value=0.0, key="add_p_price")
-                
-                if st.button("Zapisz produkt", use_container_width=True):
-                    if n_kat == "Brak":
-                        st.error("Najpierw utwórz kategorię!")
-                    elif n_name:
-                        if not df.empty and n_name.strip().lower() in df["Produkt"].str.lower().values:
-                            st.error("Produkt o tej nazwie już istnieje!")
+            it1, it2 = st.tabs(["🎁 Produkty", "📂 Kategorie"])
+            with it1:
+                with st.expander("➕ Dodaj nowy", expanded=True):
+                    n_n = st.text_input("Nazwa")
+                    n_k = st.selectbox("Kategoria", list(k_map.keys()) if k_map else ["Brak"])
+                    c_p1, c_p2 = st.columns(2)
+                    n_zak = c_p1.number_input("Cena Zakupu", min_value=0.0)
+                    n_spr = c_p2.number_input("Cena Sprzedaży", min_value=0.0)
+                    if st.button("Zapisz", use_container_width=True):
+                        if n_k == "Brak": st.error("Dodaj kategorię!")
+                        elif not n_n: st.warning("Podaj nazwę.")
+                        elif not df.empty and n_n.lower() in df["Produkt"].str.lower().values: st.error("Już jest!")
                         else:
-                            # --- PRZYDZIELANIE NAJNIŻSZEGO ID ---
-                            new_p_id = get_lowest_free_id("produkty")
-                            safe_execute(lambda: supabase.table("produkty").insert({
-                                "id": new_p_id,
-                                "nazwa": n_name.strip(), 
-                                "kategoria_id": k_map[n_kat], 
-                                "liczba": 0, 
-                                "cena": n_price
-                            }))
-                            log_history(n_name, "Utworzenie", 0)
-                            st.rerun()
-
-            with pt2:
+                            new_id = get_lowest_free_id("produkty")
+                            safe_execute(lambda: supabase.table("produkty").insert({"id": new_id, "nazwa": n_n, "kategoria_id": k_map[n_k], "liczba": 0, "cena": n_spr, "koszt": n_zak}))
+                            log_history(n_n, "Nowy", 0); st.rerun()
                 if not df.empty:
-                    edit_p = st.selectbox("Produkt do edycji", df["Produkt"].tolist())
-                    new_p_name = st.text_input("Nowa nazwa", value=edit_p)
-                    if st.button("Zaktualizuj nazwę", use_container_width=True):
-                        if new_p_name.strip().lower() in df["Produkt"].str.lower().values and new_p_name.strip().lower() != edit_p.lower():
-                            st.error("Ta nazwa jest zajęta!")
-                        else:
-                            p_id = df[df["Produkt"] == edit_p].iloc[0]["ID"]
-                            safe_execute(lambda: supabase.table("produkty").update({"nazwa": new_p_name.strip()}).eq("id", p_id))
-                            log_history(edit_p, f"Zmiana nazwy na: {new_p_name}", 0)
+                    with st.expander("✏️ Edytuj / 🗑️ Usuń"):
+                        e_p = st.selectbox("Wybierz", df["Produkt"].tolist())
+                        e_row = df[df["Produkt"] == e_p].iloc[0]
+                        new_name = st.text_input("Nowa nazwa", value=e_p)
+                        cb1, cb2 = st.columns(2)
+                        if cb1.button("Zmień"):
+                            safe_execute(lambda: supabase.table("produkty").update({"nazwa": new_name}).eq("id", e_row["ID"]))
                             st.rerun()
-
-            with pt3:
-                if not df.empty:
-                    del_p = st.selectbox("Produkt do usunięcia", df["Produkt"].tolist())
-                    if st.button("USUŃ PRODUKT", use_container_width=True, type="primary"):
-                        p_id_del = df[df["Produkt"] == del_p].iloc[0]["ID"]
-                        safe_execute(lambda: supabase.table("produkty").delete().eq("id", p_id_del))
-                        log_history(del_p, "Usunięcie produktu", 0)
+                        if cb2.button("USUŃ", type="primary"):
+                            safe_execute(lambda: supabase.table("produkty").delete().eq("id", e_row["ID"]))
+                            st.rerun()
+            with it2:
+                n_kat_name = st.text_input("Nazwa kategorii")
+                if st.button("Utwórz"):
+                    if n_kat_name and n_kat_name not in k_map:
+                        safe_execute(lambda: supabase.table("kategoria").insert({"id": get_lowest_free_id("kategoria"), "nazwa": n_kat_name}))
                         st.rerun()
-
-        st.subheader("Zarządzanie kategoriami")
-        with st.container(border=True):
-            ct1, ct2 = st.tabs(["➕ Dodaj", "🗑️ Usuń"])
-            with ct1:
-                new_c = st.text_input("Nowa nazwa kategorii")
-                if st.button("Utwórz kategorię", use_container_width=True):
-                    if new_c:
-                        if new_c.strip().lower() in [k.lower() for k in k_map.keys()]:
-                            st.error("Kategoria już istnieje!")
-                        else:
-                            # --- PRZYDZIELANIE NAJNIŻSZEGO ID ---
-                            new_c_id = get_lowest_free_id("kategoria")
-                            safe_execute(lambda: supabase.table("kategoria").insert({
-                                "id": new_c_id,
-                                "nazwa": new_c.strip()
-                            }))
-                            st.rerun()
-            with ct2:
                 if k_map:
-                    c_to_del = st.selectbox("Usuń kategorię", list(k_map.keys()))
-                    if st.button("USUŃ KATEGORIĘ I JEJ PRODUKTY", use_container_width=True, type="primary"):
-                        kid = k_map[c_to_del]
+                    d_k = st.selectbox("Usuń", list(k_map.keys()))
+                    if st.button("USUŃ KASKADOWO"):
+                        kid = k_map[d_k]
                         safe_execute(lambda: supabase.table("produkty").delete().eq("kategoria_id", kid))
                         safe_execute(lambda: supabase.table("kategoria").delete().eq("id", kid))
                         st.rerun()
 
-# --- ZAKŁADKA 3: HISTORIA ---
 with t3:
-    if not df_hist.empty:
-        st.dataframe(df_hist, use_container_width=True, hide_index=True)
-        c_rep, c_del = st.columns(2)
-        with c_rep:
-            txt_report = generate_txt(df_hist)
-            st.download_button("📄 Pobierz raport (TXT)", txt_report, f"raport_{datetime.now().strftime('%Y%m%d_%H%M')}.txt", "text/plain", use_container_width=True)
-        with c_del:
-            if st.button("🗑️ Wyczyść całą historię", type="secondary", use_container_width=True):
-                safe_execute(lambda: supabase.table("historia").delete().gt("id", -1)) # Usuwa wszystko od 0 w górę
-                st.rerun()
-    else:
-        st.info("Historia operacji jest pusta.")
+    if not df_h.empty:
+        st.dataframe(df_h, use_container_width=True, hide_index=True)
+        rep = generate_txt(df_h)
+        st.download_button("📄 Raport TXT", rep, "raport.txt", use_container_width=True)
+        if st.button("🗑️ Czyść Historię", use_container_width=True, type="secondary"):
+            safe_execute(lambda: supabase.table("historia").delete().gt("id", -1))
+            st.rerun()
