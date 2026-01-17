@@ -4,6 +4,8 @@ import pandas as pd
 import plotly.express as px
 from fpdf import FPDF
 from datetime import datetime
+import requests
+from io import BytesIO
 
 # --- 1. KONFIGURACJA STRONY ---
 st.set_page_config(page_title="ProMagazyn v3.2", page_icon="📦", layout="wide")
@@ -29,61 +31,74 @@ def log_history(produkt, typ, ilosc):
             supabase.table("historia").insert({
                 "produkt": str(produkt),
                 "typ": str(typ),
-                "ilosc": int(ilosc)  # Naprawia błąd JSON serializable
+                "ilosc": int(ilosc)
             }).execute()
         except:
             pass 
 
 def generate_pdf(dataframe):
-    """Generowanie raportu PDF z polskimi znakami."""
+    """Generowanie raportu PDF z obsługą polskich znaków (poprawiony błąd FileNotFoundError)."""
     pdf = FPDF()
     pdf.add_page()
-    pdf.add_font('DejaVu', '', 'https://github.com/reingart/pyfpdf/raw/master/font/DejaVuSans.ttf', uni=True)
-    pdf.set_font('DejaVu', '', 16)
+    
+    # Naprawa błędu czcionki: pobieranie do pamięci RAM
+    try:
+        font_url = 'https://github.com/reingart/pyfpdf/raw/master/font/DejaVuSans.ttf'
+        response = requests.get(font_url)
+        response.raise_for_status()
+        pdf.add_font('DejaVu', '', BytesIO(response.content), uni=True)
+        pdf.set_font('DejaVu', '', 16)
+    except Exception as e:
+        pdf.set_font('Arial', 'B', 16)
+        st.warning(f"Użyto czcionki zastępczej (brak polskich znaków w PDF). Błąd: {e}")
+
     pdf.cell(200, 10, txt="Raport Historii Magazynowej", ln=True, align='C')
     pdf.ln(10)
-    pdf.set_font('DejaVu', '', 10)
     
+    # Nagłówki
+    if 'DejaVu' in pdf.fonts:
+        pdf.set_font('DejaVu', '', 10)
+    else:
+        pdf.set_font('Arial', '', 10)
+        
     pdf.set_fill_color(200, 220, 255)
     cols = [("Data", 45), ("Produkt", 65), ("Typ", 40), ("Ilość", 30)]
     for txt, w in cols:
         pdf.cell(w, 10, txt, border=1, fill=True)
     pdf.ln()
     
+    # Dane
     for _, row in dataframe.iterrows():
         pdf.cell(45, 10, str(row['Data']), border=1)
         pdf.cell(65, 10, str(row['Produkt']), border=1)
         pdf.cell(40, 10, str(row['Typ']), border=1)
         pdf.cell(30, 10, str(row['Ilość']), border=1, ln=True)
+    
     return pdf.output()
 
 # --- 4. POBIERANIE DANYCH ---
-# Inicjalizacja zmiennych, aby uniknąć NameError ze screenów
 data, history_data, k_map = [], [], {}
 
 if supabase:
     try:
-        # Próba pobrania głównych danych
         p_res = supabase.table("produkty").select("id, nazwa, liczba, cena, kategoria(nazwa)").execute()
         k_res = supabase.table("kategoria").select("id, nazwa").execute()
         
         data = p_res.data if p_res.data else []
         k_map = {k['nazwa']: int(k['id']) for k in k_res.data} if k_res.data else {}
         
-        # Próba pobrania historii
         try:
             h_res = supabase.table("historia").select("*").order("created_at", desc=True).limit(50).execute()
             history_data = h_res.data if h_res.data else []
         except:
             st.warning("⚠️ Tabela 'historia' nie została znaleziona. Uruchom skrypt SQL.")
     except Exception as e:
-        st.error(f"Błąd połączenia (Errno 11 lub brak RLS): {e}")
+        st.error(f"Błąd połączenia: {e}")
 
 # --- 5. PRZYGOTOWANIE DATAFRAMES ---
 df = pd.DataFrame(data) if data else pd.DataFrame()
 if not df.empty:
     df["Kategoria"] = df["kategoria"].apply(lambda x: x["nazwa"] if x else "Brak")
-    # Ważne: rzutowanie ID na int, aby uniknąć problemów w update()
     df = df.rename(columns={"nazwa": "Produkt", "liczba": "Ilość", "cena": "Cena", "id": "ID"})
     df["Wartość"] = df["Ilość"] * df["Cena"]
 
@@ -92,7 +107,7 @@ df_hist = pd.DataFrame([
     for i in history_data
 ]) if history_data else pd.DataFrame()
 
-# --- 6. INTERFEJS ---
+# --- 6. INTERFEJS (Nienaruszony układ UI) ---
 st.title("📦 System Magazynowy Pro v3.2")
 
 t1, t2, t3 = st.tabs(["📊 Stan", "🛠️ Operacje", "📜 Historia"])
@@ -116,7 +131,6 @@ with t2:
                 target_p = st.selectbox("Wybierz towar", df["Produkt"].tolist())
                 amount = st.number_input("Ilość", min_value=1, step=1)
                 
-                # Wyciąganie danych wiersza i rzutowanie na typy Python
                 p_row = df[df["Produkt"] == target_p].iloc[0]
                 p_id = int(p_row["ID"]) 
                 current_qty = int(p_row["Ilość"])
@@ -159,7 +173,13 @@ with t3:
         st.subheader("Ostatnie operacje")
         st.dataframe(df_hist, use_container_width=True, hide_index=True)
         if st.button("📄 Generuj raport PDF"):
-            pdf_bytes = generate_pdf(df_hist)
-            st.download_button("💾 Pobierz plik", data=pdf_bytes, file_name="historia_magazynu.pdf", mime="application/pdf")
+            with st.spinner("Pobieranie czcionek i generowanie..."):
+                pdf_bytes = generate_pdf(df_hist)
+                st.download_button(
+                    "💾 Pobierz plik", 
+                    data=pdf_bytes, 
+                    file_name=f"raport_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf", 
+                    mime="application/pdf"
+                )
     else:
         st.info("Historia operacji jest pusta.")
