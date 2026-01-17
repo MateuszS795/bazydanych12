@@ -26,7 +26,6 @@ def log_history(produkt, typ, ilosc):
     """Bezpieczne zapisywanie zdarzenia w bazie danych."""
     if supabase:
         try:
-            # Rzutowanie na typy natywne zapobiega błędom JSON serializable
             supabase.table("historia").insert({
                 "produkt": str(produkt),
                 "typ": str(typ),
@@ -36,21 +35,16 @@ def log_history(produkt, typ, ilosc):
             pass 
 
 def generate_txt(dataframe):
-    """Generuje raport tekstowy (TXT) obsługujący polskie znaki bez dodatkowych czcionek."""
+    """Generuje raport tekstowy (TXT) obsługujący polskie znaki."""
     output = io.StringIO()
     output.write("RAPORT HISTORII MAGAZYNOWEJ\n")
     output.write(f"Wygenerowano: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
     output.write("=" * 70 + "\n\n")
-    
-    # Nagłówki kolumn z wyrównaniem
     output.write(f"{'Data':<20} | {'Produkt':<20} | {'Typ':<15} | {'Ilość':<10}\n")
     output.write("-" * 70 + "\n")
-    
-    # Dane wiersz po wierszu
     for _, row in dataframe.iterrows():
         line = f"{str(row['Data']):<20} | {str(row['Produkt']):<20} | {str(row['Typ']):<15} | {str(row['Ilość']):<10}\n"
         output.write(line)
-        
     return output.getvalue()
 
 # --- 4. POBIERANIE DANYCH ---
@@ -68,7 +62,6 @@ if supabase:
             h_res = supabase.table("historia").select("*").order("created_at", desc=True).limit(50).execute()
             history_data = h_res.data if h_res.data else []
         except:
-            # Ciche ostrzeżenie o braku tabeli historii (zapobiega crashowi UI)
             st.sidebar.warning("⚠️ Brak tabeli 'historia' w bazie danych.")
     except Exception as e:
         st.error(f"Błąd połączenia: {e}")
@@ -85,7 +78,7 @@ df_hist = pd.DataFrame([
     for i in history_data
 ]) if history_data else pd.DataFrame()
 
-# --- 6. INTERFEJS (ZACHOWANE ORYGINALNE GUI) ---
+# --- 6. INTERFEJS ---
 st.title("📦 System Magazynowy Pro v3.3")
 
 t1, t2, t3 = st.tabs(["📊 Stan", "🛠️ Operacje", "📜 Historia"])
@@ -109,7 +102,6 @@ with t2:
                 target_p = st.selectbox("Wybierz towar", df["Produkt"].tolist())
                 amount = st.number_input("Ilość", min_value=1, step=1)
                 
-                # Bezpieczne pobranie danych wiersza
                 p_row = df[df["Produkt"] == target_p].iloc[0]
                 p_id = int(p_row["ID"]) 
                 current_qty = int(p_row["Ilość"])
@@ -131,8 +123,11 @@ with t2:
                         st.error("Niewystarczająca ilość towaru!")
 
     with col_r:
-        st.subheader("Dodaj Nowy Produkt")
+        st.subheader("Zarządzanie strukturą")
+        
+        # Sekcja dodawania produktu
         with st.container(border=True):
+            st.write("**Dodaj Nowy Produkt**")
             n_name = st.text_input("Nazwa przedmiotu")
             n_kat = st.selectbox("Kategoria", list(k_map.keys()) if k_map else ["Brak"])
             n_price = st.number_input("Cena jednostkowa", min_value=0.0)
@@ -146,13 +141,25 @@ with t2:
                     }).execute()
                     log_history(n_name, "Utworzenie", 0)
                     st.rerun()
+        
+        # Sekcja dodawania kategorii (NOWOŚĆ)
+        with st.container(border=True):
+            st.write("**Dodaj Nową Kategorię**")
+            new_cat_name = st.text_input("Nazwa kategorii")
+            if st.button("Utwórz kategorię", use_container_width=True):
+                if new_cat_name:
+                    try:
+                        supabase.table("kategoria").insert({"nazwa": str(new_cat_name)}).execute()
+                        st.success(f"Dodano kategorię: {new_cat_name}")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Błąd: {e}")
 
 with t3:
     if not df_hist.empty:
         st.subheader("Ostatnie operacje")
         st.dataframe(df_hist, use_container_width=True, hide_index=True)
         
-        # Logika pobierania raportu (zamieniona z PDF na TXT)
         txt_report = generate_txt(df_hist)
         st.download_button(
             label="📄 Pobierz raport (TXT)",
