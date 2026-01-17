@@ -24,10 +24,14 @@ supabase = init_connection()
 
 # --- 3. FUNKCJE POMOCNICZE ---
 def safe_execute(query_func):
-    for i in range(3):
-        try: return query_func().execute()
+    """Wzmocniona obsługa błędów połączenia (np. Errno 11)."""
+    for i in range(5):  # Zwiększono liczbę prób do 5
+        try: 
+            return query_func().execute()
         except Exception as e:
-            if "11" in str(e) and i < 2: time.sleep(1); continue
+            if ("11" in str(e) or "temporarily unavailable" in str(e).lower()) and i < 4:
+                time.sleep(2) # Dłuższa przerwa przed kolejną próbą
+                continue
             raise e
 
 def get_lowest_free_id(table_name):
@@ -63,7 +67,8 @@ if supabase:
         k_map = {k['nazwa']: int(k['id']) for k in k_res.data} if k_res.data else {}
         h_res = safe_execute(lambda: supabase.table("historia").select("*").order("created_at", desc=True).limit(100))
         history_data = h_res.data if h_res.data else []
-    except Exception as e: st.error(f"Błąd: {e}")
+    except Exception as e: 
+        st.error(f"Błąd pobierania danych: {e}")
 
 # --- 5. PRZYGOTOWANIE TABEL ---
 df = pd.DataFrame(data) if data else pd.DataFrame()
@@ -91,7 +96,7 @@ with t1:
         st.dataframe(df[["Produkt", "Kategoria", "Ilość", "Cena"]], use_container_width=True, hide_index=True)
     else: st.info("Magazyn jest pusty.")
 
-# ZAKŁADKA 2: ANALIZA STANU
+# ZAKŁADKA 2: ANALIZA STANU (NAPRAWIONA LINIA 108)
 with t_an:
     if not df.empty:
         st.subheader("Wizualizacja Magazynu")
@@ -105,4 +110,53 @@ with t_an:
             st.plotly_chart(fig_bar, use_container_width=True)
         st.divider()
         cat_val = df.groupby('Kategoria')['Wartość'].sum().reset_index()
-        fig_cat = px.bar(cat_val.sort_values('Wartość'), x='Wartość', y='
+        # POPRAWKA SyntaxError poniżej:
+        fig_cat = px.bar(cat_val.sort_values('Wartość'), x='Wartość', y='Kategoria', orientation='h',
+                         title='Łączna wartość magazynu wg Kategorii', text_auto='.2s', color='Kategoria')
+        st.plotly_chart(fig_cat, use_container_width=True)
+    else: st.info("Dodaj produkty, aby odblokować analizę.")
+
+# ZAKŁADKA 3: OPERACJE
+with t2:
+    col_l, col_r = st.columns(2)
+    with col_l:
+        st.subheader("Ruch towaru")
+        if not df.empty:
+            with st.container(border=True):
+                target_p = st.selectbox("Produkt", df["Produkt"].tolist(), key="move_p")
+                amount = st.number_input("Ilość", min_value=1, step=1)
+                p_row = df[df["Produkt"] == target_p].iloc[0]
+                b1, b2 = st.columns(2)
+                if b1.button("📥 PRZYJMIJ", use_container_width=True):
+                    safe_execute(lambda: supabase.table("produkty").update({"liczba": int(p_row["Ilość"]) + amount}).eq("id", p_row["ID"]))
+                    log_history(target_p, "Przyjęcie", amount); st.rerun()
+                if b2.button("📤 WYDAJ", use_container_width=True):
+                    if p_row["Ilość"] >= amount:
+                        safe_execute(lambda: supabase.table("produkty").update({"liczba": int(p_row["Ilość"]) - amount}).eq("id", p_row["ID"]))
+                        log_history(target_p, "Wydanie", amount); st.rerun()
+                    else: st.error("Za mało towaru!")
+        else: st.info("Brak produktów.")
+
+    with col_r:
+        st.subheader("Zarządzanie")
+        with st.container(border=True):
+            st.write("**Produkty**")
+            pt1, pt2, pt3 = st.tabs(["➕ Dodaj", "✏️ Edytuj", "🗑️ Usuń"])
+            with pt1:
+                n_name = st.text_input("Nazwa")
+                n_kat = st.selectbox("Kategoria", list(k_map.keys()) if k_map else ["Brak"])
+                n_price = st.number_input("Cena", min_value=0.0)
+                if st.button("Zapisz produkt", use_container_width=True):
+                    if n_kat == "Brak": st.error("Dodaj kategorię!")
+                    elif n_name:
+                        if not df.empty and n_name.strip().lower() in df["Produkt"].str.lower().values: st.error("Już istnieje!")
+                        else:
+                            new_p_id = get_lowest_free_id("produkty")
+                            safe_execute(lambda: supabase.table("produkty").insert({"id": new_p_id, "nazwa": n_name.strip(), "kategoria_id": k_map[n_kat], "liczba": 0, "cena": n_price}))
+                            log_history(n_name, "Utworzenie", 0); st.rerun()
+            with pt2:
+                if not df.empty:
+                    edit_p = st.selectbox("Produkt do edycji", df["Produkt"].tolist())
+                    new_p_name = st.text_input("Nowa nazwa", value=edit_p)
+                    if st.button("Zaktualizuj nazwę", use_container_width=True):
+                        p_id =
