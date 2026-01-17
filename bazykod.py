@@ -2,13 +2,11 @@ import streamlit as st
 from supabase import create_client, Client
 import pandas as pd
 import plotly.express as px
-from fpdf import FPDF
 from datetime import datetime
-import requests
-from io import BytesIO
+import io
 
 # --- 1. KONFIGURACJA STRONY ---
-st.set_page_config(page_title="ProMagazyn v3.2", page_icon="📦", layout="wide")
+st.set_page_config(page_title="System Magazynowy Pro v3.3", page_icon="📦", layout="wide")
 
 # --- 2. POŁĄCZENIE Z SUPABASE ---
 @st.cache_resource
@@ -25,9 +23,10 @@ supabase = init_connection()
 
 # --- 3. FUNKCJE POMOCNICZE ---
 def log_history(produkt, typ, ilosc):
-    """Bezpieczne logowanie zdarzeń z rzutowaniem typów."""
+    """Bezpieczne zapisywanie zdarzenia w bazie danych."""
     if supabase:
         try:
+            # Rzutowanie na typy natywne zapobiega błędom JSON serializable
             supabase.table("historia").insert({
                 "produkt": str(produkt),
                 "typ": str(typ),
@@ -36,45 +35,23 @@ def log_history(produkt, typ, ilosc):
         except:
             pass 
 
-def generate_pdf(dataframe):
-    """Generowanie raportu PDF z obsługą polskich znaków (poprawiony błąd FileNotFoundError)."""
-    pdf = FPDF()
-    pdf.add_page()
+def generate_txt(dataframe):
+    """Generuje raport tekstowy (TXT) obsługujący polskie znaki bez dodatkowych czcionek."""
+    output = io.StringIO()
+    output.write("RAPORT HISTORII MAGAZYNOWEJ\n")
+    output.write(f"Wygenerowano: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+    output.write("=" * 70 + "\n\n")
     
-    # Naprawa błędu czcionki: pobieranie do pamięci RAM
-    try:
-        font_url = 'https://github.com/reingart/pyfpdf/raw/master/font/DejaVuSans.ttf'
-        response = requests.get(font_url)
-        response.raise_for_status()
-        pdf.add_font('DejaVu', '', BytesIO(response.content), uni=True)
-        pdf.set_font('DejaVu', '', 16)
-    except Exception as e:
-        pdf.set_font('Arial', 'B', 16)
-        st.warning(f"Użyto czcionki zastępczej (brak polskich znaków w PDF). Błąd: {e}")
-
-    pdf.cell(200, 10, txt="Raport Historii Magazynowej", ln=True, align='C')
-    pdf.ln(10)
+    # Nagłówki kolumn z wyrównaniem
+    output.write(f"{'Data':<20} | {'Produkt':<20} | {'Typ':<15} | {'Ilość':<10}\n")
+    output.write("-" * 70 + "\n")
     
-    # Nagłówki
-    if 'DejaVu' in pdf.fonts:
-        pdf.set_font('DejaVu', '', 10)
-    else:
-        pdf.set_font('Arial', '', 10)
-        
-    pdf.set_fill_color(200, 220, 255)
-    cols = [("Data", 45), ("Produkt", 65), ("Typ", 40), ("Ilość", 30)]
-    for txt, w in cols:
-        pdf.cell(w, 10, txt, border=1, fill=True)
-    pdf.ln()
-    
-    # Dane
+    # Dane wiersz po wierszu
     for _, row in dataframe.iterrows():
-        pdf.cell(45, 10, str(row['Data']), border=1)
-        pdf.cell(65, 10, str(row['Produkt']), border=1)
-        pdf.cell(40, 10, str(row['Typ']), border=1)
-        pdf.cell(30, 10, str(row['Ilość']), border=1, ln=True)
-    
-    return pdf.output()
+        line = f"{str(row['Data']):<20} | {str(row['Produkt']):<20} | {str(row['Typ']):<15} | {str(row['Ilość']):<10}\n"
+        output.write(line)
+        
+    return output.getvalue()
 
 # --- 4. POBIERANIE DANYCH ---
 data, history_data, k_map = [], [], {}
@@ -91,7 +68,8 @@ if supabase:
             h_res = supabase.table("historia").select("*").order("created_at", desc=True).limit(50).execute()
             history_data = h_res.data if h_res.data else []
         except:
-            st.warning("⚠️ Tabela 'historia' nie została znaleziona. Uruchom skrypt SQL.")
+            # Ciche ostrzeżenie o braku tabeli historii (zapobiega crashowi UI)
+            st.sidebar.warning("⚠️ Brak tabeli 'historia' w bazie danych.")
     except Exception as e:
         st.error(f"Błąd połączenia: {e}")
 
@@ -107,8 +85,8 @@ df_hist = pd.DataFrame([
     for i in history_data
 ]) if history_data else pd.DataFrame()
 
-# --- 6. INTERFEJS (Nienaruszony układ UI) ---
-st.title("📦 System Magazynowy Pro v3.2")
+# --- 6. INTERFEJS (ZACHOWANE ORYGINALNE GUI) ---
+st.title("📦 System Magazynowy Pro v3.3")
 
 t1, t2, t3 = st.tabs(["📊 Stan", "🛠️ Operacje", "📜 Historia"])
 
@@ -131,6 +109,7 @@ with t2:
                 target_p = st.selectbox("Wybierz towar", df["Produkt"].tolist())
                 amount = st.number_input("Ilość", min_value=1, step=1)
                 
+                # Bezpieczne pobranie danych wiersza
                 p_row = df[df["Produkt"] == target_p].iloc[0]
                 p_id = int(p_row["ID"]) 
                 current_qty = int(p_row["Ilość"])
@@ -172,14 +151,14 @@ with t3:
     if not df_hist.empty:
         st.subheader("Ostatnie operacje")
         st.dataframe(df_hist, use_container_width=True, hide_index=True)
-        if st.button("📄 Generuj raport PDF"):
-            with st.spinner("Pobieranie czcionek i generowanie..."):
-                pdf_bytes = generate_pdf(df_hist)
-                st.download_button(
-                    "💾 Pobierz plik", 
-                    data=pdf_bytes, 
-                    file_name=f"raport_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf", 
-                    mime="application/pdf"
-                )
+        
+        # Logika pobierania raportu (zamieniona z PDF na TXT)
+        txt_report = generate_txt(df_hist)
+        st.download_button(
+            label="📄 Pobierz raport (TXT)",
+            data=txt_report,
+            file_name=f"raport_magazynowy_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
+            mime="text/plain"
+        )
     else:
         st.info("Historia operacji jest pusta.")
