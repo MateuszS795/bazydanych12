@@ -159,4 +159,41 @@ with t2:
                     edit_p = st.selectbox("Produkt do edycji", df["Produkt"].tolist())
                     new_p_name = st.text_input("Nowa nazwa", value=edit_p)
                     if st.button("Zaktualizuj nazwę", use_container_width=True):
-                        p_id =
+                        p_id = df[df["Produkt"] == edit_p].iloc[0]["ID"]
+                        safe_execute(lambda: supabase.table("produkty").update({"nazwa": new_p_name.strip()}).eq("id", p_id)); st.rerun()
+            with pt3:
+                if not df.empty:
+                    del_p = st.selectbox("Produkt do usunięcia", df["Produkt"].tolist())
+                    if st.button("USUŃ PRODUKT", use_container_width=True, type="primary"):
+                        p_id_del = df[df["Produkt"] == del_p].iloc[0]["ID"]
+                        safe_execute(lambda: supabase.table("produkty").delete().eq("id", p_id_del)); st.rerun()
+        
+        with st.container(border=True):
+            st.write("**Kategorie**")
+            ct1, ct2 = st.tabs(["➕ Dodaj", "🗑️ Usuń"])
+            with ct1:
+                new_c = st.text_input("Nowa kategoria")
+                if st.button("Utwórz kategorię", use_container_width=True):
+                    if new_c and new_c not in k_map:
+                        safe_execute(lambda: supabase.table("kategoria").insert({"id": get_lowest_free_id("kategoria"), "nazwa": new_c.strip()})); st.rerun()
+            with ct2:
+                if k_map:
+                    c_to_del = st.selectbox("Usuń kategorię", list(k_map.keys()))
+                    if st.button("USUŃ Z PRODUKTAMI", use_container_width=True):
+                        kid = k_map[c_to_del]
+                        safe_execute(lambda: supabase.table("produkty").delete().eq("kategoria_id", kid))
+                        safe_execute(lambda: supabase.table("kategoria").delete().eq("id", kid)); st.rerun()
+
+# ZAKŁADKA 4: HISTORIA
+with t3:
+    if not df_hist.empty:
+        st.dataframe(df_hist, use_container_width=True, hide_index=True)
+        col_h1, col_h2 = st.columns(2)
+        with col_h1:
+            report_data = generate_txt(df_hist)
+            st.download_button(label="📄 Pobierz raport (TXT)", data=report_data, 
+                               file_name=f"raport_{datetime.now().strftime('%Y%m%d')}.txt", use_container_width=True)
+        with col_h2:
+            if st.button("🗑️ Wyczyść historię", type="secondary", use_container_width=True):
+                safe_execute(lambda: supabase.table("historia").delete().gt("id", -1)); st.rerun()
+    else: st.info("Historia jest pusta.")
