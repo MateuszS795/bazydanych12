@@ -22,7 +22,7 @@ supabase = init_connection()
 
 # --- 3. FUNKCJE POMOCNICZE ---
 def log_history(produkt, typ, ilosc):
-    """Zapisuje zdarzenie w historii. Teraz pokazuje błędy w panelu bocznym."""
+    """Zapisuje zdarzenie w historii."""
     if supabase:
         try:
             supabase.table("historia").insert({
@@ -31,7 +31,6 @@ def log_history(produkt, typ, ilosc):
                 "ilosc": int(ilosc)
             }).execute()
         except Exception as e:
-            # Wyświetlamy błąd, żebyś wiedział dlaczego historia nie działa
             st.sidebar.error(f"Błąd zapisu historii: {e}")
 
 def generate_txt(dataframe):
@@ -58,7 +57,7 @@ if supabase:
             h_res = supabase.table("historia").select("*").order("created_at", desc=True).limit(50).execute()
             history_data = h_res.data if h_res.data else []
         except Exception as e:
-            st.sidebar.warning(f"Problem z pobraniem historii: {e}")
+            pass 
             
     except Exception as e:
         st.error(f"Błąd pobierania danych: {e}")
@@ -103,7 +102,6 @@ with t2:
                 target_p = st.selectbox("Wybierz produkt", df["Produkt"].tolist(), key="op_prod")
                 amount = st.number_input("Ilość", min_value=1, step=1, key="op_amount")
                 
-                # Pobranie danych wybranego produktu
                 p_row = df[df["Produkt"] == target_p].iloc[0]
                 p_id = int(p_row["ID"])
                 current_qty = int(p_row["Ilość"])
@@ -139,7 +137,6 @@ with t2:
     with col_r:
         st.subheader("Baza produktów")
         
-        # 1. Dodawanie nowego produktu
         with st.container(border=True):
             st.write("**Dodaj Nowy Produkt**")
             n_name = st.text_input("Nazwa", key="n_p_name")
@@ -160,12 +157,10 @@ with t2:
                 else:
                     st.warning("Wpisz nazwę i wybierz kategorię.")
 
-        # 2. Zarządzanie kategoriami (TO OKIENKO ZNIKNĘŁO, TERAZ JEST NAPRAWIONE)
         with st.container(border=True):
             st.write("**Zarządzaj Kategoriami**")
             ck1, ck2 = st.tabs(["➕ Dodaj", "✏️ Edytuj / Usuń"])
             
-            # Zakładka Dodawania
             with ck1:
                 new_cat = st.text_input("Nowa nazwa kategorii", key="n_c_name")
                 if st.button("Utwórz kategorię", use_container_width=True):
@@ -177,7 +172,6 @@ with t2:
                                 supabase.table("kategoria").insert({"nazwa": new_cat.strip()}).execute()
                                 st.rerun()
             
-            # Zakładka Edycji / Usuwania (NAPRAWIONA LOGIKA)
             with ck2:
                 if k_map:
                     cat_sel = st.selectbox("Wybierz kategorię", list(k_map.keys()), key="c_sel")
@@ -193,30 +187,27 @@ with t2:
                                 supabase.table("kategoria").update({"nazwa": new_name.strip()}).eq("id", k_map[cat_sel]).execute()
                                 st.rerun()
                     
+                    # --- ZMIANA: Kaskadowe usuwanie ---
                     if col_e2.button("Usuń", use_container_width=True):
-                        # Sprawdzamy, czy w kategorii są produkty
-                        is_not_empty = not df[df["kat_id"] == k_map[cat_sel]].empty if not df.empty else False
-                        
-                        if is_not_empty:
-                            st.error("Nie można usunąć: Kategoria zawiera produkty!")
-                        else:
-                            with st.spinner("Usuwanie..."):
-                                supabase.table("kategoria").delete().eq("id", k_map[cat_sel]).execute()
-                                st.rerun()
+                        with st.spinner("Usuwanie kategorii i produktów..."):
+                            cat_id_to_del = k_map[cat_sel]
+                            
+                            # 1. Usuń wszystkie produkty należące do tej kategorii
+                            supabase.table("produkty").delete().eq("kategoria_id", cat_id_to_del).execute()
+                            
+                            # 2. Usuń samą kategorię
+                            supabase.table("kategoria").delete().eq("id", cat_id_to_del).execute()
+                            
+                            st.success(f"Usunięto kategorię '{cat_sel}' wraz z produktami.")
+                            st.rerun()
                 else:
-                    st.info("Brak kategorii do edycji. Dodaj pierwszą kategorię w zakładce obok.")
+                    st.info("Brak kategorii. Dodaj pierwszą w zakładce obok.")
 
 # --- ZAKŁADKA 3: HISTORIA ---
 with t3:
     if not df_hist.empty:
         st.dataframe(df_hist, use_container_width=True, hide_index=True)
-        
         txt_report = generate_txt(df_hist)
-        st.download_button(
-            label="📄 Pobierz raport (TXT)",
-            data=txt_report,
-            file_name=f"raport_{datetime.now().strftime('%Y%m%d')}.txt",
-            mime="text/plain"
-        )
+        st.download_button("📄 Pobierz raport (TXT)", txt_report, f"raport_{datetime.now().strftime('%Y%m%d')}.txt", "text/plain")
     else:
         st.info("Historia operacji jest pusta.")
