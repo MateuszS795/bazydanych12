@@ -102,7 +102,6 @@ with t1:
 with t2:
     col_l, col_r = st.columns(2)
     
-    # LEWA KOLUMNA: Ruch towaru
     with col_l:
         st.subheader("Ruch towaru")
         if not df.empty:
@@ -126,7 +125,6 @@ with t2:
         else:
             st.info("Opcja niedostępna - dodaj najpierw produkty do bazy.")
 
-    # PRAWA KOLUMNA: Baza produktów i kategorii
     with col_r:
         st.subheader("Zarządzanie produktami")
         with st.container(border=True):
@@ -134,31 +132,44 @@ with t2:
             
             with pt1:
                 n_name = st.text_input("Nazwa nowego produktu")
-                n_kat = st.selectbox("Kategoria", list(k_map.keys()) if k_map else ["Brak"], key="add_p_kat")
+                # Lista kategorii - jeśli pusta, zawiera tylko "Brak"
+                available_cats = list(k_map.keys()) if k_map else ["Brak"]
+                n_kat = st.selectbox("Kategoria", available_cats, key="add_p_kat")
                 n_price = st.number_input("Cena", min_value=0.0, key="add_p_price")
+                
                 if st.button("Zapisz nowy produkt", use_container_width=True):
-                    if n_name and n_kat != "Brak":
+                    # --- KLUCZOWA POPRAWKA: Błąd przy braku kategorii ---
+                    if n_kat == "Brak":
+                        st.error("Błąd! Nie możesz dodać produktu do 'Brak'. Najpierw utwórz co najmniej jedną kategorię w panelu poniżej.")
+                    elif not n_name:
+                        st.warning("Podaj nazwę produktu.")
+                    else:
                         if not df.empty and n_name.strip().lower() in df["Produkt"].str.lower().values:
                             st.error("Produkt o tej nazwie już istnieje!")
                         else:
-                            safe_execute(lambda: supabase.table("produkty").insert({"nazwa": n_name.strip(), "kategoria_id": k_map[n_kat], "liczba": 0, "cena": n_price}))
+                            safe_execute(lambda: supabase.table("produkty").insert({
+                                "nazwa": n_name.strip(), 
+                                "kategoria_id": k_map[n_kat], 
+                                "liczba": 0, 
+                                "cena": n_price
+                            }))
                             log_history(n_name, "Utworzenie", 0)
                             st.rerun()
             
             with pt2:
                 if not df.empty:
-                    edit_p = st.selectbox("Wybierz produkt do edycji", df["Produkt"].tolist())
-                    new_p_name = st.text_input("Nowa nazwa produktu", value=edit_p)
+                    edit_p = st.selectbox("Produkt do edycji", df["Produkt"].tolist())
+                    new_p_name = st.text_input("Nowa nazwa", value=edit_p)
                     if st.button("Zaktualizuj nazwę", use_container_width=True):
                         if new_p_name.strip().lower() in df["Produkt"].str.lower().values and new_p_name.strip().lower() != edit_p.lower():
-                            st.error("Ta nazwa jest już zajęta przez inny produkt!")
+                            st.error("Ta nazwa jest już zajęta!")
                         else:
                             p_id = df[df["Produkt"] == edit_p].iloc[0]["ID"]
                             safe_execute(lambda: supabase.table("produkty").update({"nazwa": new_p_name.strip()}).eq("id", p_id))
                             log_history(edit_p, f"Zmiana nazwy na: {new_p_name}", 0)
                             st.rerun()
                 else:
-                    st.write("Brak produktów do edycji.")
+                    st.write("Brak produktów.")
 
             with pt3:
                 if not df.empty:
@@ -183,7 +194,7 @@ with t2:
                             st.rerun()
             with ct2:
                 if k_map:
-                    c_to_del = st.selectbox("Wybierz kategorię do usunięcia", list(k_map.keys()))
+                    c_to_del = st.selectbox("Usuń kategorię", list(k_map.keys()))
                     if st.button("USUŃ KATEGORIĘ I JEJ PRODUKTY", use_container_width=True, type="primary"):
                         kid = k_map[c_to_del]
                         safe_execute(lambda: supabase.table("produkty").delete().eq("kategoria_id", kid))
