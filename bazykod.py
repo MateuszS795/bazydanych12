@@ -7,7 +7,7 @@ import io
 import time
 
 # --- 1. KONFIGURACJA STRONY ---
-st.set_page_config(page_title="Magazyn Pro v5.1", page_icon="📦", layout="wide")
+st.set_page_config(page_title="Magazyn Pro v5.2", page_icon="📦", layout="wide")
 
 @st.cache_resource
 def init_connection():
@@ -21,7 +21,7 @@ def init_connection():
 
 supabase = init_connection()
 
-# --- 2. FUNKCJE POMOCNICZE I BAZODANOWE ---
+# --- 2. FUNKCJE BAZODANOWE ---
 def safe_execute(query_func):
     for i in range(5):
         try: return query_func().execute()
@@ -82,7 +82,7 @@ if supabase:
         settings = get_settings()
     except Exception as e: st.error(f"Błąd danych: {e}")
 
-# --- 4. PRZETWARZANIE ---
+# --- 4. PRZETWARZANIE DANYCH ---
 df = pd.DataFrame(p_raw) if p_raw else pd.DataFrame()
 if not df.empty:
     df["Kategoria"] = df["kategoria"].apply(lambda x: x["nazwa"] if x else "Brak")
@@ -95,9 +95,10 @@ df_hist = pd.DataFrame([
 ]) if h_raw else pd.DataFrame()
 
 # --- 5. INTERFEJS ---
-st.title("📦 System Magazynowy Pro v5.1")
+st.title("📦 System Magazynowy Pro v5.2")
 t1, t_an, t2, t3 = st.tabs(["📊 Stan", "📈 Analiza", "🛠️ Operacje", "📜 Historia"])
 
+# --- TAB 1: STAN ---
 with t1:
     if not df.empty:
         with st.expander("⚙️ Konfiguracja poziomów zapasów", expanded=False):
@@ -112,12 +113,21 @@ with t1:
                 st.success("Zapisano!"); time.sleep(0.5); st.rerun()
 
         c_h1, c_h2 = st.columns([2, 1])
-        search = c_h1.text_input("🔍 Szukaj...", "")
-        sort_by = c_h2.selectbox("Sortuj:", ["Nazwa", "Wartość", "Stan"])
+        search = c_h1.text_input("🔍 Szukaj produktu lub kategorii...", "")
+        sort_by = c_h2.selectbox("Sortuj według:", ["Nazwa", "Wartość", "Stan"])
 
         f_df = df.copy()
-        if search: f_df = f_df[f_df['Produkt'].str.contains(search, case=False) | f_df['Kategoria'].str.contains(search, case=False)]
+        if search:
+            f_df = f_df[f_df['Produkt'].str.contains(search, case=False) | f_df['Kategoria'].str.contains(search, case=False)]
         
+        # Logika sortowania
+        if sort_by == "Wartość":
+            f_df = f_df.sort_values(by="Wartość", ascending=False)
+        elif sort_by == "Stan":
+            f_df = f_df.sort_values(by="Ilość", ascending=True)
+        else:
+            f_df = f_df.sort_values(by="Produkt", ascending=True)
+
         def get_stat(q):
             if q <= n_brak: return "🔴 Brak/Krytyczny"
             if q < n_low: return "🟡 Niski"
@@ -137,19 +147,19 @@ with t1:
                 "Cena": st.column_config.NumberColumn(format="%.2f zł"),
                 "Wartość": st.column_config.NumberColumn(format="%.2f zł"),
                 "Ilość": st.column_config.ProgressColumn(
-                    format="%d szt.", # ZMIENIONO % na szt.
+                    format="%d szt.", 
                     min_value=0, 
                     max_value=int(max(f_df['Ilość'].max(), n_med))
                 )
             })
     else: st.info("Magazyn pusty.")
 
+# --- TAB 2: ANALIZA ---
 with t_an:
     if not df.empty:
         ca1, ca2 = st.columns(2)
         with ca1:
             fig_pie = px.pie(df, values='Ilość', names='Produkt', title='Udział ilościowy (szt. i %)', hole=0.3)
-            # DODANO textinfo dla wyświetlania sztuk i procentów jednocześnie
             fig_pie.update_traces(textinfo='value+percent+label', textposition='inside')
             st.plotly_chart(fig_pie, use_container_width=True)
         with ca2:
@@ -160,6 +170,7 @@ with t_an:
         fig_cat = px.bar(cat_v.sort_values('Wartość'), x='Wartość', y='Kategoria', orientation='h', title='Wartość wg Kategorii', color='Kategoria', text_auto='.2s')
         st.plotly_chart(fig_cat, use_container_width=True)
 
+# --- TAB 3: OPERACJE ---
 with t2:
     cl, cr = st.columns(2)
     with cl:
@@ -193,14 +204,14 @@ with t2:
                         log_history(nn, "Nowy", 0); st.rerun()
             with it2:
                 if not df.empty:
-                    ep = st.selectbox("Produkt do edycji", df["Produkt"].tolist(), key="edit_ep")
+                    ep = st.selectbox("Edytuj produkt", df["Produkt"].tolist(), key="edit_ep")
                     en = st.text_input("Nowa nazwa", value=ep, key="edit_en")
                     if st.button("Zaktualizuj nazwę", use_container_width=True):
                         eid = df[df["Produkt"] == ep].iloc[0]["ID"]
                         safe_execute(lambda: supabase.table("produkty").update({"nazwa": en}).eq("id", eid)); st.rerun()
             with it3:
                 if not df.empty:
-                    dp = st.selectbox("Produkt do usunięcia", df["Produkt"].tolist(), key="del_dp")
+                    dp = st.selectbox("Usuń produkt", df["Produkt"].tolist(), key="del_dp")
                     if st.button("USUŃ DEFINITYWNIE", type="primary", use_container_width=True):
                         did = df[df["Produkt"] == dp].iloc[0]["ID"]
                         safe_execute(lambda: supabase.table("produkty").delete().eq("id", did)); st.rerun()
@@ -222,6 +233,7 @@ with t2:
                         safe_execute(lambda: supabase.table("produkty").delete().eq("kategoria_id", kid))
                         safe_execute(lambda: supabase.table("kategoria").delete().eq("id", kid)); st.rerun()
 
+# --- TAB 4: HISTORIA ---
 with t3:
     if not df_hist.empty:
         st.dataframe(df_hist, use_container_width=True, hide_index=True)
