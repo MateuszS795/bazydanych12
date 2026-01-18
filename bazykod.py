@@ -7,7 +7,7 @@ import io
 import time
 
 # --- 1. KONFIGURACJA STRONY ---
-st.set_page_config(page_title="Magazyn Pro v5.2", page_icon="📦", layout="wide")
+st.set_page_config(page_title="Magazyn Pro v5.3", page_icon="📦", layout="wide")
 
 @st.cache_resource
 def init_connection():
@@ -95,7 +95,7 @@ df_hist = pd.DataFrame([
 ]) if h_raw else pd.DataFrame()
 
 # --- 5. INTERFEJS ---
-st.title("📦 System Magazynowy Pro v5.2")
+st.title("📦 System Magazynowy Pro v5.3")
 t1, t_an, t2, t3 = st.tabs(["📊 Stan", "📈 Analiza", "🛠️ Operacje", "📜 Historia"])
 
 # --- TAB 1: STAN ---
@@ -120,7 +120,6 @@ with t1:
         if search:
             f_df = f_df[f_df['Produkt'].str.contains(search, case=False) | f_df['Kategoria'].str.contains(search, case=False)]
         
-        # Logika sortowania
         if sort_by == "Wartość":
             f_df = f_df.sort_values(by="Wartość", ascending=False)
         elif sort_by == "Stan":
@@ -195,20 +194,42 @@ with t2:
         with st.container(border=True):
             it1, it2, it3 = st.tabs(["➕ Dodaj", "✏️ Edytuj", "🗑️ Usuń"])
             with it1:
-                nn = st.text_input("Nazwa produktu", key="add_nn")
+                nn = st.text_input("Nazwa produktu", key="add_nn").strip()
                 nk = st.selectbox("Kategoria", list(k_map.keys()) if k_map else ["Brak"], key="add_nk")
                 np = st.number_input("Cena", min_value=0.0, key="add_np")
                 if st.button("Zapisz produkt", use_container_width=True):
+                    # WALIDACJA DUPLIKATU
                     if nn and nk != "Brak":
-                        safe_execute(lambda: supabase.table("produkty").insert({"id": get_lowest_free_id("produkty"), "nazwa": nn, "kategoria_id": k_map[nk], "liczba": 0, "cena": np}))
-                        log_history(nn, "Nowy", 0); st.rerun()
+                        exists = not df[(df["Produkt"].str.lower() == nn.lower()) & (df["Kategoria"] == nk)].empty
+                        if exists:
+                            st.error(f"Produkt '{nn}' już istnieje w kategorii '{nk}'!")
+                        else:
+                            try:
+                                safe_execute(lambda: supabase.table("produkty").insert({
+                                    "id": get_lowest_free_id("produkty"), 
+                                    "nazwa": nn, 
+                                    "kategoria_id": k_map[nk], 
+                                    "liczba": 0, 
+                                    "cena": np
+                                }))
+                                log_history(nn, "Nowy", 0); st.rerun()
+                            except Exception as e:
+                                st.error("Błąd bazy danych (prawdopodobnie duplikat).")
+                    else: st.warning("Uzupełnij nazwę!")
+
             with it2:
                 if not df.empty:
                     ep = st.selectbox("Edytuj produkt", df["Produkt"].tolist(), key="edit_ep")
-                    en = st.text_input("Nowa nazwa", value=ep, key="edit_en")
+                    en = st.text_input("Nowa nazwa", value=ep, key="edit_en").strip()
                     if st.button("Zaktualizuj nazwę", use_container_width=True):
+                        # WALIDACJA PRZY ZMIANIE NAZWY
                         eid = df[df["Produkt"] == ep].iloc[0]["ID"]
-                        safe_execute(lambda: supabase.table("produkty").update({"nazwa": en}).eq("id", eid)); st.rerun()
+                        ekat = df[df["Produkt"] == ep].iloc[0]["Kategoria"]
+                        exists = not df[(df["Produkt"].str.lower() == en.lower()) & (df["Kategoria"] == ekat) & (df["ID"] != eid)].empty
+                        if exists:
+                            st.error(f"Nazwa '{en}' jest już zajęta w tej kategorii!")
+                        else:
+                            safe_execute(lambda: supabase.table("produkty").update({"nazwa": en}).eq("id", eid)); st.rerun()
             with it3:
                 if not df.empty:
                     dp = st.selectbox("Usuń produkt", df["Produkt"].tolist(), key="del_dp")
@@ -220,11 +241,12 @@ with t2:
             st.write("**Kategorie**")
             ck1, ck2 = st.tabs(["➕ Dodaj", "🗑️ Usuń"])
             with ck1:
-                nck = st.text_input("Nazwa kategorii", key="cat_nn")
+                nck = st.text_input("Nazwa kategorii", key="cat_nn").strip()
                 if st.button("Utwórz", use_container_width=True):
-                    if nck and nck not in k_map:
+                    if nck and nck.lower() not in [k.lower() for k in k_map.keys()]:
                         safe_execute(lambda: supabase.table("kategoria").insert({"id": get_lowest_free_id("kategoria"), "nazwa": nck}))
                         st.rerun()
+                    elif nck: st.warning("Taka kategoria już istnieje!")
             with ck2:
                 if k_map:
                     dk = st.selectbox("Usuń kategorię", list(k_map.keys()), key="cat_dk")
@@ -233,7 +255,6 @@ with t2:
                         safe_execute(lambda: supabase.table("produkty").delete().eq("kategoria_id", kid))
                         safe_execute(lambda: supabase.table("kategoria").delete().eq("id", kid)); st.rerun()
 
-# --- TAB 4: HISTORIA ---
 with t3:
     if not df_hist.empty:
         st.dataframe(df_hist, use_container_width=True, hide_index=True)
