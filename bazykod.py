@@ -136,7 +136,11 @@ with t1:
             column_config={
                 "Cena": st.column_config.NumberColumn(format="%.2f zł"),
                 "Wartość": st.column_config.NumberColumn(format="%.2f zł"),
-                "Ilość": st.column_config.ProgressColumn(min_value=0, max_value=int(max(f_df['Ilość'].max(), n_med)))
+                "Ilość": st.column_config.ProgressColumn(
+                    format="%d szt.", # ZMIENIONO % na szt.
+                    min_value=0, 
+                    max_value=int(max(f_df['Ilość'].max(), n_med))
+                )
             })
     else: st.info("Magazyn pusty.")
 
@@ -144,8 +148,9 @@ with t_an:
     if not df.empty:
         ca1, ca2 = st.columns(2)
         with ca1:
-            fig_pie = px.pie(df, values='Ilość', names='Produkt', title='Liczba sztuk na magazynie', hole=0.3)
-            fig_pie.update_traces(textinfo='value+label', textposition='auto')
+            fig_pie = px.pie(df, values='Ilość', names='Produkt', title='Udział ilościowy (szt. i %)', hole=0.3)
+            # DODANO textinfo dla wyświetlania sztuk i procentów jednocześnie
+            fig_pie.update_traces(textinfo='value+percent+label', textposition='inside')
             st.plotly_chart(fig_pie, use_container_width=True)
         with ca2:
             fig_bar = px.bar(df.sort_values('Wartość', ascending=False), x='Produkt', y='Wartość', title='Wartość rynkowa (zł)', color='Wartość', text_auto='.2s')
