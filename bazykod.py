@@ -7,7 +7,7 @@ import io
 import time
 
 # --- 1. KONFIGURACJA STRONY ---
-st.set_page_config(page_title="Magazyn Pro v5.5", page_icon="📦", layout="wide")
+st.set_page_config(page_title="Magazyn Pro v5.6", page_icon="📦", layout="wide")
 
 @st.cache_resource
 def init_connection():
@@ -21,7 +21,7 @@ def init_connection():
 
 supabase = init_connection()
 
-# --- 2. FUNKCJE BAZODANOWE ---
+# --- 2. FUNKCJE BAZODANOWE I POMOCNICZE ---
 def safe_execute(query_func):
     for i in range(5):
         try: return query_func().execute()
@@ -63,9 +63,12 @@ def log_history(p, t, q):
 
 def generate_txt(dataframe):
     output = io.StringIO()
-    output.write(f"RAPORT MAGAZYNOWY - {datetime.now().strftime('%Y-%m-%d %H:%M')}\n" + "="*50 + "\n")
+    output.write(f"RAPORT MAGAZYNOWY - {datetime.now().strftime('%Y-%m-%d %H:%M')}\n")
+    output.write("="*60 + "\n")
+    output.write(f"{'Data':<18} | {'Produkt':<20} | {'Typ':<12} | {'Ilość'}\n")
+    output.write("-"*60 + "\n")
     for _, row in dataframe.iterrows():
-        output.write(f"{row['Data']} | {row['Produkt']:<20} | {row['Typ']:<12} | {row['Ilość']} szt.\n")
+        output.write(f"{row['Data']:<18} | {row['Produkt']:<20} | {row['Typ']:<12} | {row['Ilość']} szt.\n")
     return output.getvalue()
 
 # --- 3. POBIERANIE DANYCH ---
@@ -76,7 +79,7 @@ if supabase:
     try:
         p_res = safe_execute(lambda: supabase.table("produkty").select("id, nazwa, liczba, cena, kategoria(id, nazwa)"))
         k_res = safe_execute(lambda: supabase.table("kategoria").select("id, nazwa"))
-        h_res = safe_execute(lambda: supabase.table("historia").select("*").order("created_at", desc=True).limit(100))
+        h_res = safe_execute(lambda: supabase.table("historia").select("*").order("created_at", desc=True).limit(200))
         p_raw, k_raw, h_raw = p_res.data or [], k_res.data or [], h_res.data or []
         k_map = {k['nazwa']: int(k['id']) for k in k_raw}
         settings = get_settings()
@@ -95,28 +98,28 @@ df_hist = pd.DataFrame([
 ]) if h_raw else pd.DataFrame()
 
 # --- 5. INTERFEJS ---
-st.title("📦 System Magazynowy Pro v5.5")
+st.title("📦 System Magazynowy Pro v5.6")
 t1, t_an, t2, t3 = st.tabs(["📊 Stan", "📈 Analiza", "🛠️ Operacje", "📜 Historia"])
 
+# --- TAB 1: STAN ---
 with t1:
     if not df.empty:
         with st.expander("⚙️ Konfiguracja poziomów zapasów", expanded=False):
             c_cfg1, c_cfg2, c_cfg3 = st.columns(3)
-            n_brak = c_cfg1.number_input("KRYTYCZNY (🔴) poniżej lub równe:", value=int(settings.get('prog_brak', 0)))
-            n_low = c_cfg2.number_input("NISKI (🟡) poniżej:", value=int(settings.get('prog_niski', 5)))
-            n_med = c_cfg3.number_input("ŚREDNI (🔵) poniżej:", value=int(settings.get('prog_sredni', 15)))
+            n_brak = c_cfg1.number_input("KRYTYCZNY (🔴) <=:", value=int(settings.get('prog_brak', 0)))
+            n_low = c_cfg2.number_input("NISKI (🟡) <:", value=int(settings.get('prog_niski', 5)))
+            n_med = c_cfg3.number_input("ŚREDNI (🔵) <:", value=int(settings.get('prog_sredni', 15)))
             
             if st.button("Zapisz progi"):
-                # WALIDACJA LOGICZNA PROGÓW
                 if n_low <= n_brak:
-                    st.error("Błąd: Poziom NISKI (🟡) musi być większy niż poziom KRYTYCZNY (🔴)!")
+                    st.error("Poziom NISKI (🟡) musi być większy niż KRYTYCZNY (🔴)!")
                 elif n_med <= n_low:
-                    st.error("Błąd: Poziom ŚREDNI (🔵) musi być większy niż poziom NISKI (🟡)!")
+                    st.error("Poziom ŚREDNI (🔵) musi być większy niż NISKI (🟡)!")
                 else:
                     update_setting('prog_brak', n_brak)
                     update_setting('prog_niski', n_low)
                     update_setting('prog_sredni', n_med)
-                    st.success("Zapisano progi!"); time.sleep(0.5); st.rerun()
+                    st.success("Zapisano!"); time.sleep(0.5); st.rerun()
 
         c_h1, c_h2 = st.columns([2, 1])
         search = c_h1.text_input("🔍 Szukaj...", "")
@@ -151,11 +154,12 @@ with t1:
             })
     else: st.info("Magazyn pusty.")
 
+# --- TAB 2: ANALIZA ---
 with t_an:
     if not df.empty:
         ca1, ca2 = st.columns(2)
         with ca1:
-            fig_pie = px.pie(df, values='Ilość', names='Produkt', title='Udział ilościowy', hole=0.3)
+            fig_pie = px.pie(df, values='Ilość', names='Produkt', title='Udział ilościowy (szt. i %)', hole=0.3)
             fig_pie.update_traces(textinfo='value+percent+label', textposition='inside')
             st.plotly_chart(fig_pie, use_container_width=True)
         with ca2:
@@ -166,6 +170,7 @@ with t_an:
         fig_cat = px.bar(cat_val.sort_values('Wartość'), x='Wartość', y='Kategoria', orientation='h', title='Wartość wg Kategorii', color='Kategoria', text_auto='.2s')
         st.plotly_chart(fig_cat, use_container_width=True)
 
+# --- TAB 3: OPERACJE ---
 with t2:
     cl, cr = st.columns(2)
     with cl:
@@ -196,18 +201,18 @@ with t2:
                 nk = st.selectbox("Kategoria", options_k if options_k else ["Brak kategorii"], key="add_nk")
                 np = st.number_input("Cena", min_value=0.0, key="add_np")
                 if st.button("Zapisz produkt", use_container_width=True):
-                    if not nn: st.error("Musisz podać nazwę produktu!")
-                    elif nk == "Brak kategorii": st.error("Najpierw musisz dodać kategorię (poniżej)!")
+                    if not nn: st.error("Podaj nazwę produktu!")
+                    elif nk == "Brak kategorii": st.error("Najpierw dodaj kategorię!")
                     else:
                         exists = not df[(df["Produkt"].str.lower() == nn.lower()) & (df["Kategoria"] == nk)].empty if not df.empty else False
                         if exists: st.error("Ten produkt już istnieje w tej kategorii!")
                         else:
-                            new_p_id = get_lowest_free_id("produkty")
-                            safe_execute(lambda: supabase.table("produkty").insert({"id": new_p_id, "nazwa": nn, "kategoria_id": k_map[nk], "liczba": 0, "cena": np}))
+                            safe_execute(lambda: supabase.table("produkty").insert({"id": get_lowest_free_id("produkty"), "nazwa": nn, "kategoria_id": k_map[nk], "liczba": 0, "cena": np}))
                             log_history(nn, "Nowy", 0); st.rerun()
+            # ... (sekcje Edytuj i Usuń pozostają bez zmian)
             with it2:
                 if not df.empty:
-                    ep = st.selectbox("Produkt do edycji", df["Produkt"].tolist(), key="edit_ep")
+                    ep = st.selectbox("Edytuj produkt", df["Produkt"].tolist(), key="edit_ep")
                     en = st.text_input("Nowa nazwa", value=ep, key="edit_en").strip()
                     if st.button("Zaktualizuj", use_container_width=True):
                         eid = df[df["Produkt"] == ep].iloc[0]["ID"]
@@ -218,7 +223,7 @@ with t2:
                             safe_execute(lambda: supabase.table("produkty").update({"nazwa": en}).eq("id", eid)); st.rerun()
             with it3:
                 if not df.empty:
-                    dp = st.selectbox("Produkt do usunięcia", df["Produkt"].tolist(), key="del_dp")
+                    dp = st.selectbox("Usuń produkt", df["Produkt"].tolist(), key="del_dp")
                     if st.button("USUŃ", type="primary", use_container_width=True):
                         did = df[df["Produkt"] == dp].iloc[0]["ID"]
                         safe_execute(lambda: supabase.table("produkty").delete().eq("id", did)); st.rerun()
@@ -241,8 +246,24 @@ with t2:
                         safe_execute(lambda: supabase.table("produkty").delete().eq("kategoria_id", kid))
                         safe_execute(lambda: supabase.table("kategoria").delete().eq("id", kid)); st.rerun()
 
+# --- TAB 4: HISTORIA (Z PRZYWRÓCONYM EKSPORTEM) ---
 with t3:
     if not df_hist.empty:
         st.dataframe(df_hist, use_container_width=True, hide_index=True)
-        if st.button("🗑️ Czyść Historię", use_container_width=True):
-            safe_execute(lambda: supabase.table("historia").delete().gt("id", -1)); st.rerun()
+        
+        c_hist1, c_hist2 = st.columns(2)
+        with c_hist1:
+            # Przywrócony przycisk eksportu
+            st.download_button(
+                label="📄 Eksportuj Historię do TXT",
+                data=generate_txt(df_hist),
+                file_name=f"raport_magazyn_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
+                mime="text/plain",
+                use_container_width=True
+            )
+        with c_hist2:
+            if st.button("🗑️ Czyść Historię", use_container_width=True):
+                safe_execute(lambda: supabase.table("historia").delete().gt("id", -1))
+                st.success("Historia wyczyszczona!"); time.sleep(0.5); st.rerun()
+    else:
+        st.info("Brak wpisów w historii.")
