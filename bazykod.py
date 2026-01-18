@@ -7,7 +7,7 @@ import io
 import time
 
 # --- 1. KONFIGURACJA STRONY ---
-st.set_page_config(page_title="Magazyn Pro v5.4", page_icon="📦", layout="wide")
+st.set_page_config(page_title="Magazyn Pro v5.5", page_icon="📦", layout="wide")
 
 @st.cache_resource
 def init_connection():
@@ -95,7 +95,7 @@ df_hist = pd.DataFrame([
 ]) if h_raw else pd.DataFrame()
 
 # --- 5. INTERFEJS ---
-st.title("📦 System Magazynowy Pro v5.4")
+st.title("📦 System Magazynowy Pro v5.5")
 t1, t_an, t2, t3 = st.tabs(["📊 Stan", "📈 Analiza", "🛠️ Operacje", "📜 Historia"])
 
 with t1:
@@ -105,9 +105,18 @@ with t1:
             n_brak = c_cfg1.number_input("KRYTYCZNY (🔴) poniżej lub równe:", value=int(settings.get('prog_brak', 0)))
             n_low = c_cfg2.number_input("NISKI (🟡) poniżej:", value=int(settings.get('prog_niski', 5)))
             n_med = c_cfg3.number_input("ŚREDNI (🔵) poniżej:", value=int(settings.get('prog_sredni', 15)))
+            
             if st.button("Zapisz progi"):
-                update_setting('prog_brak', n_brak); update_setting('prog_niski', n_low); update_setting('prog_sredni', n_med)
-                st.success("Zapisano!"); time.sleep(0.5); st.rerun()
+                # WALIDACJA LOGICZNA PROGÓW
+                if n_low <= n_brak:
+                    st.error("Błąd: Poziom NISKI (🟡) musi być większy niż poziom KRYTYCZNY (🔴)!")
+                elif n_med <= n_low:
+                    st.error("Błąd: Poziom ŚREDNI (🔵) musi być większy niż poziom NISKI (🟡)!")
+                else:
+                    update_setting('prog_brak', n_brak)
+                    update_setting('prog_niski', n_low)
+                    update_setting('prog_sredni', n_med)
+                    st.success("Zapisano progi!"); time.sleep(0.5); st.rerun()
 
         c_h1, c_h2 = st.columns([2, 1])
         search = c_h1.text_input("🔍 Szukaj...", "")
